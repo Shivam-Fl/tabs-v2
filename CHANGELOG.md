@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- See who owes what in a group — each member's balance (owed, even, or owes) and the
+  fewest transfers needed to settle up.
+
 ### Fixed
 
 - Error messages on the expense form now clear as soon as you edit the field they were
