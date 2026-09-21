@@ -211,6 +211,12 @@ async function loadGroup(groupId) {
       document.getElementById('expense-error').textContent =
         'Shares must be whole numbers of 0 or more.';
     });
+    // The correction for that message is typed into this same box, so editing it makes
+    // the message stale. Without this the user fixes the share and the error sits there
+    // until the next submit, which reads as the fix not having worked.
+    shareInput.addEventListener('input', () => {
+      document.getElementById('expense-error').textContent = '';
+    });
     label.appendChild(shareInput);
     splitDiv.appendChild(label);
   }
@@ -370,8 +376,23 @@ for (const radio of document.querySelectorAll('input[name="split-mode"]')) {
 document.getElementById('split-checkboxes').addEventListener('change', (e) => {
   // Unchecking a member takes their share box out of play rather than leaving a stale
   // count in the form for the submit handler to pick up.
-  if (e.target.type === 'checkbox') syncShareInputs();
+  if (e.target.type === 'checkbox') {
+    syncShareInputs();
+    document.getElementById('expense-error').textContent = '';
+  }
 });
+
+// Every field on this form that can raise one of its validation errors is also the field
+// the user corrects it in, so an edit means the message on the form's error line is about
+// a problem that no longer exists. The submit handler clears the line too, but that only
+// helps on the next attempt: until then the user sees the old complaint over the value
+// they have already fixed. The share boxes are the exception — they are rebuilt by
+// loadGroup(), so their listener is attached there, where they are created.
+for (const id of ['expense-desc', 'expense-amount']) {
+  document.getElementById(id).addEventListener('input', () => {
+    document.getElementById('expense-error').textContent = '';
+  });
+}
 
 // Back link
 document.getElementById('back-link').addEventListener('click', showCreateView);
