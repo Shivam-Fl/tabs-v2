@@ -26,16 +26,16 @@ runtime:
     plan:               qwen3.7-plus
     plan_proposer:      qwen3.7-plus
     plan_critic:        deepseek-v4.1-flash
-    plan_arbiter:       qwen3.8-max
+    plan_arbiter:       minimax-m3
     plan_reviewer:      qwen3.6-plus
     debug:              qwen3.7-plus
     implement:          qwen3.6-plus
-    review:             kimi-k3
-    review_correctness: deepseek-v4.1-flash
+    review:             deepseek-v4.1-flash
+    review_correctness: qwen3.7-plus
     review_design:      minimax-m3
     qa:                 minimax-m3
-    root_cause:         qwen3.7-plus
-    librarian:          minimax-m3
+    root_cause:         deepseek-v4.1-flash
+    librarian:          deepseek-v4-flash
     release:            deepseek-v4-flash
     maintainer:         kimi-k3
     # Decides the stack once, for the life of the repo. The one place to spend the most
