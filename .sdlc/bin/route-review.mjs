@@ -22,7 +22,9 @@ const exec = promisify(execFile);
 const pr = process.env.PR || die('PR is required');
 const dispatch = (wf, ...args) => exec('node', ['.sdlc/bin/dispatch.mjs', wf, ...args]);
 
-const data = await ghJson(['pr', 'view', pr, '--json', 'reviews,body']);
+// headRefOid, because a criterion rejected twice against the SAME commit is one round
+// re-judged rather than two attempts that both failed.
+const data = await ghJson(['pr', 'view', pr, '--json', 'reviews,body,headRefOid']);
 const issue = (data.body ?? '').match(/(?:closes|fixes|resolves)\s+#(\d+)/i)?.[1];
 if (!issue) {
   // Not ours: no work order, no ledger, nothing to route. Silence beats a confusing failure.
@@ -173,11 +175,14 @@ await recordOnThePr('CHANGES_REQUESTED');
 const cfg = await loadConfig();
 const ledger = await readLedger(repoOf(), Number(issue)).then((r) => r.ledger).catch(() => null);
 const criteria = rejectionCriteria(data.reviews ?? []);
-const repeat = repeatedCriterion(ledger?.review_history ?? [], criteria);
+// The commit this review judged. Two rejections of one criterion against the SAME commit are
+// one round re-judged, not two attempts that both failed.
+const head = data.headRefOid ?? null;
+const repeat = repeatedCriterion(ledger?.review_history ?? [], criteria, head);
 const repeatEscalate = Number(cfg.limits?.repeat_failure_escalate ?? 2);
 
 await updateLedger(repoOf(), Number(issue), (l) => (l
-  ? { ...l, review_history: [...(l.review_history ?? []), criteria].slice(-20) }
+  ? { ...l, review_history: [...(l.review_history ?? []), { criteria, head }].slice(-20) }
   : null)).catch(() => {});
 
 // Root-cause gets ONE turn on a given criterion. After it has revised the work order, the

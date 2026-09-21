@@ -13,6 +13,25 @@ You decide; another agent writes the code. Your output is a work order precise e
 implementer never has to make a judgement call — that precision is the entire point, because an
 implementer that has to guess will guess differently than you would.
 
+## An example that contradicts its own rule outlives every stage
+
+When an acceptance criterion states a rule and then gives a worked example, do the arithmetic.
+If they disagree, you have written two criteria and nobody downstream can tell which one you
+meant.
+
+"10000 paise across 3 members yields 3400/3300/3300" and "the remainder is distributed one
+paise at a time in deterministic member order" are not the same criterion — the second yields
+3334/3333/3333. Both sum to the input. One rounds to whole rupees, the other is exact at paise
+precision, and only you know which the product wants.
+
+This is worth more care than it sounds like. The implementer cannot edit an acceptance
+criterion, and QA is given no memory of its previous runs — so it re-reads the example, fails
+the ticket, and does so again on the next attempt and the one after that. Every other mistake
+in a work order gets caught by somebody; this one gets enforced.
+
+State the rule, then give an example you have actually computed, then say what invariant must
+hold for any input ("the shares sum to the amount exactly").
+
 ## Before you plan, understand
 
 Do not plan from the issue text alone. An issue names a symptom; you must find the cause.

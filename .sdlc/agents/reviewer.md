@@ -12,6 +12,38 @@ timeout_minutes: 15
 CI already proved it compiles, lints, and passes its tests. Do not repeat that. Review the
 things a machine cannot check.
 
+## Say what you are not holding the merge for
+
+When you approve while still naming findings, list them in `unresolved` in your verdict block:
+`{"verdict": "approve", "unresolved": [{"title": "...", "detail": "..."}]}`.
+
+They become **one** follow-up ticket — one, not one each, because two reviews on a single PR
+once produced ten tickets, each a few lines of work and each needing its own full cycle.
+
+This is the difference between a finding and a remark. An approval once described an XSS hole
+in the UI's `innerHTML`, a server bound to every interface, and a lost-update race in the store
+handlers — correctly judging none of them worth blocking a localhost slice. Nothing recorded
+them, so all three stopped existing when the branch merged. Deciding not to block is a
+judgement about *timing*; it says nothing about whether the finding was real.
+
+## Read the right diff
+
+Use `gh pr diff <n>`. It is computed from the **merge base**, so it contains only what this
+branch did.
+
+Do not use `git diff main..HEAD`. Two dots compare the two tips, so every commit the base has
+gained since this branch was cut appears as a *reversion* on the branch — and there is nothing
+in that output to tell you the branch never touched those files.
+
+This is not a style preference. A framework update landed on `main` while a PR was open, and
+the two-dot diff showed it as ~900 lines of deleted pipeline infrastructure, including a
+policy flip. The review blocked on scope, correctly describing what it saw, about a branch
+that had changed twelve files none of which were those. The implementer was then asked to
+answer it, which it could only have done by deleting someone else's work.
+
+If you need the base for any other reason, get it from `git merge-base origin/<base> HEAD`,
+not from the base branch's tip.
+
 ## What to actually look for, in priority order
 
 1. **Does it fix the root cause, or the symptom?** Compare the diff against the work order's

@@ -18,14 +18,30 @@ import { gh, ghJson, setOutput } from './lib/actions.js';
 const pr = process.env.PR;
 if (!pr) { setOutput('updated', 'false'); process.exit(0); }
 
+// A check that could not run must not look like a check that passed.
+//
+// These bails used to be silent, so a transient API error — or a wrong working directory —
+// produced `updated=false` and the review proceeded against a base that might have moved,
+// which is the exact failure this exists to prevent. Quiet enough to ignore, loud enough to
+// find afterwards: the step is `continue-on-error`, so a warning is the right volume.
 const info = await ghJson(['pr', 'view', pr, '--json', 'headRefName,baseRefName,state'])
-  .catch(() => null);
-if (!info || info.state !== 'OPEN') { setOutput('updated', 'false'); process.exit(0); }
+  .catch((e) => { process.stdout.write(`::warning::could not read PR #${pr}: ${String(e.message).split('\n')[0]}\n`); return null; });
+if (!info) { setOutput('updated', 'unknown'); process.exit(0); }
+if (info.state !== 'OPEN') {
+  process.stdout.write(`PR #${pr} is ${info.state}, not open — nothing to update\n`);
+  setOutput('updated', 'false');
+  process.exit(0);
+}
 
 const repo = process.env.GITHUB_REPOSITORY;
 const cmp = await ghJson(['api', `repos/${repo}/compare/${info.baseRefName}...${info.headRefName}`])
-  .catch(() => null);
-if (!cmp) { setOutput('updated', 'false'); process.exit(0); }
+  .catch((e) => { process.stdout.write(`::warning::could not compare ${info.baseRefName}...${info.headRefName}: ${String(e.message).split('\n')[0]}\n`); return null; });
+if (!cmp) {
+  process.stdout.write('::warning::whether this branch is behind its base is unknown — a review ' +
+    'of this diff may attribute the base\'s changes to the branch\n');
+  setOutput('updated', 'unknown');
+  process.exit(0);
+}
 
 if (!cmp.behind_by) {
   process.stdout.write(`PR #${pr} is up to date with ${info.baseRefName}\n`);
