@@ -1,6 +1,6 @@
 {
   "issue": 3,
-  "pr": null,
+  "pr": 7,
   "state": "implementing",
   "owner": "implementer",
   "lock_expires": "2026-09-21T20:49:17.957Z",
@@ -84,5 +84,6 @@
     }
   ],
   "resume_at": "implement",
-  "stopped_at": "plan"
+  "stopped_at": "plan",
+  "implemented_version": 1
 }
