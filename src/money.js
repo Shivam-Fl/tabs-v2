@@ -1,6 +1,3 @@
-import fs from 'node:fs';
-import path from 'node:path';
-
 /**
  * Split an amount of paise equally among members.
  * When the amount doesn't divide evenly, the first `remainder` members

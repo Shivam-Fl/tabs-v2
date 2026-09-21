@@ -129,6 +129,27 @@ test('rejects empty split list', () => {
   );
 });
 
+test('rejects duplicate split members', () => {
+  const group = createGroup({ name: 'Test', members: ['Alice', 'Bob'] });
+  assert.throws(
+    () =>
+      addExpense(group, {
+        description: 'Lunch',
+        amountPaise: 1000,
+        payerId: 'Alice',
+        splitMemberIds: ['Alice', 'Alice'],
+      }),
+    (err) => err instanceof InvalidInputError && err.code === 'SPLIT_MEMBER_DUPLICATE',
+  );
+});
+
+test('rejects a non-string member', () => {
+  assert.throws(
+    () => createGroup({ name: 'Test', members: [{ name: 'Alice' }] }),
+    (err) => err instanceof InvalidInputError && err.code === 'MEMBER_NAME_REQUIRED',
+  );
+});
+
 test('rejects split containing a non-member', () => {
   const group = createGroup({ name: 'Test', members: ['Alice', 'Bob'] });
   assert.throws(

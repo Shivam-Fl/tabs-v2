@@ -98,6 +98,17 @@ test('GET /api/groups/:id/expenses lists expenses and shares sum to amountPaise'
     const exp = data.expenses[0];
     const shareSum = exp.shares.reduce((s, sh) => s + sh.paise, 0);
     assert.strictEqual(shareSum, exp.amountPaise);
+    // The group screen builds its payer select, split checkboxes and share
+    // labels from group.members; without them the view cannot render at all.
+    assert.ok(Array.isArray(data.group.members), 'group.members must be present');
+    assert.deepStrictEqual(
+      data.group.members.map((m) => m.id),
+      ['Alice', 'Bob', 'Charlie'],
+    );
+    assert.deepStrictEqual(
+      exp.shares.map((s) => s.memberId),
+      ['Alice', 'Bob', 'Charlie'],
+    );
   } finally {
     close();
   }
@@ -193,6 +204,36 @@ test('empty split list returns 400 with code SPLIT_REQUIRED', async () => {
     }, url);
     assert.strictEqual(status, 400);
     assert.strictEqual(data.error.code, 'SPLIT_REQUIRED');
+  } finally {
+    close();
+  }
+});
+
+test('duplicate split member returns 400 and writes nothing to the store', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const { data: groupData } = await post('/api/groups', {
+      name: 'Trip',
+      members: ['Alice', 'Bob'],
+    }, url);
+    const groupId = groupData.group.id;
+
+    const { status, data } = await post(`/api/groups/${groupId}/expenses`, {
+      description: 'Lunch',
+      amountPaise: 500,
+      payerId: 'Alice',
+      splitMemberIds: ['Alice', 'Alice'],
+    }, url);
+    assert.strictEqual(status, 400);
+    assert.strictEqual(data.error.code, 'SPLIT_MEMBER_DUPLICATE');
+
+    // AC-4: rejected input must write nothing — and the group must still read
+    // back cleanly rather than 500 on every subsequent request.
+    assert.strictEqual(store.load()[groupId].expenses.length, 0);
+    const after = await get(`/api/groups/${groupId}/expenses`, url);
+    assert.strictEqual(after.status, 200);
+    assert.strictEqual(after.data.expenses.length, 0);
   } finally {
     close();
   }

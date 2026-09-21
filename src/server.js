@@ -143,7 +143,9 @@ async function handleRequest(req, res, store) {
       const shares = splitEqual(exp.amountPaise, exp.splitMemberIds);
       return { ...exp, shares };
     });
-    return jsonResponse(res, 200, { group: { id: group.id, name: group.name }, expenses });
+    // The UI builds the payer select, the split checkboxes and every share
+    // label from `group.members`; sending only id+name left it unable to render.
+    return jsonResponse(res, 200, { group, expenses });
   }
 
   // POST /api/groups/:id/expenses
@@ -167,10 +169,12 @@ async function handleRequest(req, res, store) {
     }
     try {
       const updatedGroup = addExpense(group, parsed);
+      const expense = updatedGroup.expenses[updatedGroup.expenses.length - 1];
+      // Compute the shares before the write: anything that throws in between
+      // would otherwise commit an expense that every later read fails on.
+      const shares = splitEqual(expense.amountPaise, expense.splitMemberIds);
       data[route.groupId] = updatedGroup;
       store.save(data);
-      const expense = updatedGroup.expenses[updatedGroup.expenses.length - 1];
-      const shares = splitEqual(expense.amountPaise, expense.splitMemberIds);
       return jsonResponse(res, 201, { expense: { ...expense, shares } });
     } catch (err) {
       if (err instanceof InvalidInputError) {
