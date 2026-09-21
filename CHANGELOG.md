@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Error messages on the expense form now clear as soon as you edit the field they were
+  about, instead of lingering on screen until the next submit attempt.
+
 - Rapidly submitting the create-group form no longer creates duplicate groups with the same
   name.
 
