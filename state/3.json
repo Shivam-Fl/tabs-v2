@@ -46,7 +46,14 @@
       "digest": "The implement stage failed and no known error pattern matched. The raw output is below."
     }
   ],
-  "review_history": [],
+  "review_history": [
+    [
+      "ac-1",
+      "ac-2",
+      "ac-4",
+      "ac-5"
+    ]
+  ],
   "review_root_caused": [
     "ac-1"
   ],
