@@ -375,6 +375,10 @@ jobs:
             Approving a bad plan costs an implementation, a CI run and a QA cycle and produces
             a PR that looks finished. Rejecting a good one costs a replan. Judge accordingly.
 
+            This plan has been sent back ${{ steps.gate.outputs.rejections }} time(s) already.
+            Read that number before you decide: the bar on round three is not the bar on round
+            one, and "is every detail pinned?" is a question that always has another answer.
+
             Write plan-review.json. Verify the plan's claims yourself; do not accept
             "all callers checked" as a fact.
 
