@@ -53,7 +53,7 @@ export function createGroup(input) {
 
 export function addExpense(group, input) {
   requireObject(input);
-  const { description, amountPaise, payerId, splitMemberIds } = input;
+  const { description, amountPaise, payerId, splitMemberIds, shares } = input;
 
   if (typeof description !== 'string' || description.trim() === '') {
     throw new InvalidInputError('DESCRIPTION_REQUIRED', 'Description is required');
@@ -90,6 +90,63 @@ export function addExpense(group, input) {
     seenSplitIds.add(id);
   }
 
+  // `shares` is the optional share count per member; absent means equal split. It is
+  // validated against the split list rather than on its own, because a share count for
+  // a member who is not in the split would be divided by but never reported, and the
+  // per-member paise would then not sum to the amount.
+  let splitShares = null;
+  if (shares !== undefined) {
+    if (!Array.isArray(shares)) {
+      throw new InvalidInputError(
+        'SHARES_INVALID',
+        'shares must be an array of {memberId, shares}',
+      );
+    }
+    const seenShareIds = new Set();
+    let sumShares = 0;
+    for (const share of shares) {
+      if (share === null || typeof share !== 'object' || Array.isArray(share)) {
+        throw new InvalidInputError(
+          'SHARES_INVALID',
+          'Each share must be an object with a memberId and a shares count',
+        );
+      }
+      const { memberId, shares: count } = share;
+      if (typeof memberId !== 'string' || !Number.isInteger(count) || count < 0) {
+        throw new InvalidInputError(
+          'SHARES_INVALID',
+          'Each share needs a memberId and a non-negative integer shares count',
+        );
+      }
+      if (seenShareIds.has(memberId)) {
+        throw new InvalidInputError(
+          'SHARES_MEMBER_DUPLICATE',
+          `Share member "${memberId}" is listed more than once`,
+        );
+      }
+      seenShareIds.add(memberId);
+      if (!group.members.some((m) => m.id === memberId)) {
+        throw new InvalidInputError(
+          'SHARES_MEMBER_UNKNOWN',
+          `Share member "${memberId}" is not in this group`,
+        );
+      }
+      if (!seenSplitIds.has(memberId)) {
+        throw new InvalidInputError(
+          'SHARES_NOT_IN_SPLIT',
+          `Share member "${memberId}" is not in the split`,
+        );
+      }
+      sumShares += count;
+    }
+    // Every share 0 (and an empty list, which sums the same way) leaves nothing to
+    // divide by, so there is no split to record.
+    if (sumShares === 0) {
+      throw new InvalidInputError('SHARES_ALL_ZERO', 'At least one share must be greater than 0');
+    }
+    splitShares = shares.map((share) => ({ memberId: share.memberId, shares: share.shares }));
+  }
+
   const newExpense = {
     id: crypto.randomUUID(),
     description: description.trim(),
@@ -98,6 +155,10 @@ export function addExpense(group, input) {
     splitMemberIds: [...splitMemberIds],
     createdAt: new Date().toISOString(),
   };
+  // Set only when the expense is a share split. Assigning the key unconditionally would
+  // put `splitShares: null` on every equal-split expense, so the shape stored today would
+  // change for expenses that have nothing to do with this mode.
+  if (splitShares) newExpense.splitShares = splitShares;
 
   return {
     ...group,

@@ -165,6 +165,180 @@ test('GET /api/groups/:id/expenses lists expenses and shares sum to amountPaise'
   }
 });
 
+function tripMembers() {
+  return ['Asha', 'Rahul', 'Meera'];
+}
+
+async function createTrip(url, members = tripMembers()) {
+  const { data } = await post('/api/groups', { name: 'Goa trip', members }, url);
+  return data.group.id;
+}
+
+// AC-1, end to end over HTTP: 2:1:1 on ₹6,000.
+test('POST with shares returns per-member paise matching the shares', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    const { status, data } = await post(`/api/groups/${groupId}/expenses`, {
+      description: 'Big room',
+      amountPaise: 600000,
+      payerId: 'Asha',
+      splitMemberIds: tripMembers(),
+      shares: [
+        { memberId: 'Asha', shares: 2 },
+        { memberId: 'Rahul', shares: 1 },
+        { memberId: 'Meera', shares: 1 },
+      ],
+    }, url);
+
+    assert.strictEqual(status, 201);
+    assert.deepStrictEqual(data.expense.shares, [
+      { memberId: 'Asha', paise: 300000 },
+      { memberId: 'Rahul', paise: 150000 },
+      { memberId: 'Meera', paise: 150000 },
+    ]);
+    assert.strictEqual(
+      data.expense.shares.reduce((s, sh) => s + sh.paise, 0),
+      data.expense.amountPaise,
+    );
+  } finally {
+    close();
+  }
+});
+
+// AC-4: the equal-split expense added before the change must read back exactly as it
+// did — same per-member paise, in the same order — alongside a share-split sibling.
+test('GET returns share-split expenses and leaves equal-split ones unchanged', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    await post(`/api/groups/${groupId}/expenses`, {
+      description: 'Dinner',
+      amountPaise: 10000,
+      payerId: 'Asha',
+      splitMemberIds: tripMembers(),
+    }, url);
+    await post(`/api/groups/${groupId}/expenses`, {
+      description: 'Big room',
+      amountPaise: 600000,
+      payerId: 'Asha',
+      splitMemberIds: tripMembers(),
+      shares: [
+        { memberId: 'Asha', shares: 2 },
+        { memberId: 'Rahul', shares: 1 },
+        { memberId: 'Meera', shares: 1 },
+      ],
+    }, url);
+
+    const { status, data } = await get(`/api/groups/${groupId}/expenses`, url);
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.expenses.length, 2);
+
+    const [equal, shared] = data.expenses;
+    assert.deepStrictEqual(equal.shares, [
+      { memberId: 'Asha', paise: 3334 },
+      { memberId: 'Rahul', paise: 3333 },
+      { memberId: 'Meera', paise: 3333 },
+    ]);
+    assert.ok(!('splitShares' in equal), 'equal-split expense carries a splitShares key');
+    assert.deepStrictEqual(shared.splitShares, [
+      { memberId: 'Asha', shares: 2 },
+      { memberId: 'Rahul', shares: 1 },
+      { memberId: 'Meera', shares: 1 },
+    ]);
+    assert.deepStrictEqual(shared.shares, [
+      { memberId: 'Asha', paise: 300000 },
+      { memberId: 'Rahul', paise: 150000 },
+      { memberId: 'Meera', paise: 150000 },
+    ]);
+  } finally {
+    close();
+  }
+});
+
+// AC-3: rejected share input writes nothing and the group still reads back cleanly.
+test('POST with all-zero shares returns 400 SHARES_ALL_ZERO and writes nothing', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    const { status, data } = await post(`/api/groups/${groupId}/expenses`, {
+      description: 'Big room',
+      amountPaise: 600000,
+      payerId: 'Asha',
+      splitMemberIds: tripMembers(),
+      shares: [
+        { memberId: 'Asha', shares: 0 },
+        { memberId: 'Rahul', shares: 0 },
+        { memberId: 'Meera', shares: 0 },
+      ],
+    }, url);
+
+    assert.strictEqual(status, 400);
+    assert.strictEqual(data.error.code, 'SHARES_ALL_ZERO');
+    assert.strictEqual(store.load()[groupId].expenses.length, 0);
+    const after = await get(`/api/groups/${groupId}/expenses`, url);
+    assert.strictEqual(after.status, 200);
+    assert.strictEqual(after.data.expenses.length, 0);
+  } finally {
+    close();
+  }
+});
+
+test('POST with shares for a non-member returns 400 SHARES_MEMBER_UNKNOWN', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    const { status, data } = await post(`/api/groups/${groupId}/expenses`, {
+      description: 'Big room',
+      amountPaise: 600000,
+      payerId: 'Asha',
+      splitMemberIds: tripMembers(),
+      shares: [
+        { memberId: 'Asha', shares: 1 },
+        { memberId: 'Stranger', shares: 1 },
+      ],
+    }, url);
+
+    assert.strictEqual(status, 400);
+    assert.strictEqual(data.error.code, 'SHARES_MEMBER_UNKNOWN');
+    assert.strictEqual(store.load()[groupId].expenses.length, 0);
+  } finally {
+    close();
+  }
+});
+
+test('a share of 0 shows up as 0 paise over HTTP', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    const { status, data } = await post(`/api/groups/${groupId}/expenses`, {
+      description: 'Cab',
+      amountPaise: 50000,
+      payerId: 'Rahul',
+      splitMemberIds: ['Rahul', 'Meera', 'Asha'],
+      shares: [
+        { memberId: 'Rahul', shares: 1 },
+        { memberId: 'Meera', shares: 3 },
+        { memberId: 'Asha', shares: 0 },
+      ],
+    }, url);
+
+    assert.strictEqual(status, 201);
+    assert.deepStrictEqual(data.expense.shares, [
+      { memberId: 'Rahul', paise: 12500 },
+      { memberId: 'Meera', paise: 37500 },
+      { memberId: 'Asha', paise: 0 },
+    ]);
+  } finally {
+    close();
+  }
+});
+
 test('unknown group id returns 404', async () => {
   const store = createStore({ memory: true });
   const { close, url } = await start({ port: 0, store });
