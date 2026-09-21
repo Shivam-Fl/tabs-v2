@@ -1,7 +1,7 @@
 {
   "issue": 3,
   "pr": 7,
-  "state": "implementing",
+  "state": "needs-human",
   "owner": null,
   "lock_expires": null,
   "lock_run": null,
@@ -56,7 +56,7 @@
   ],
   "review_root_caused": [],
   "created_at": "2026-09-21T17:42:52.417Z",
-  "updated_at": "2026-09-21T18:06:08.878Z",
+  "updated_at": "2026-09-21T18:06:16.585Z",
   "history": [
     {
       "at": "2026-09-21T17:42:52.417Z",
@@ -132,6 +132,11 @@
       "at": "2026-09-21T18:06:08.878Z",
       "agent": "implementer",
       "action": "lock released"
+    },
+    {
+      "at": "2026-09-21T18:06:16.585Z",
+      "agent": "self-heal",
+      "action": "-> needs-human"
     }
   ],
   "resume_at": "implement",
