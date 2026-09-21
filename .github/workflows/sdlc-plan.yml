@@ -136,6 +136,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          show_full_output: true
           settings: ${{ steps.prov.outputs.settings }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           # Every stage dispatches the next, so all but the first agent run is initiated by
