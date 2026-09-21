@@ -6,7 +6,7 @@
   "lock_expires": null,
   "lock_run": null,
   "attempts": {
-    "plan": 3,
+    "plan": 4,
     "ci": 0,
     "review": 0,
     "qa": 0
@@ -52,7 +52,7 @@
   "review_history": [],
   "review_root_caused": [],
   "created_at": "2026-09-21T17:14:34.729Z",
-  "updated_at": "2026-09-21T17:25:38.387Z",
+  "updated_at": "2026-09-21T17:27:38.666Z",
   "history": [
     {
       "at": "2026-09-21T17:14:38.863Z",
@@ -138,6 +138,11 @@
       "at": "2026-09-21T17:25:38.387Z",
       "agent": "self-heal",
       "action": "-> needs-human"
+    },
+    {
+      "at": "2026-09-21T17:27:38.666Z",
+      "agent": "plan",
+      "action": "plan attempt 4"
     }
   ],
   "flow_plan": {
