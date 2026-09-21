@@ -125,6 +125,18 @@ async function handleRequest(req, res, store) {
     try {
       const group = createGroup(parsed);
       const data = store.load();
+      // The client's busy flag only covers one tab. Two tabs, a replayed request or a
+      // direct API call all arrive here, and `group.name` had no uniqueness constraint,
+      // so each of them persisted another group with the same name. Compared on the
+      // trimmed, case-folded name: 'Goa Trip' and ' goa trip ' are one group to the
+      // user who typed them, and showing both is the duplicate the ticket is about.
+      const normalizedName = group.name.toLowerCase();
+      const duplicate = Object.values(data).find(
+        (existing) => existing.name.trim().toLowerCase() === normalizedName,
+      );
+      if (duplicate) {
+        return errorResponse(res, 'GROUP_NAME_TAKEN', 'A group with this name already exists', 400);
+      }
       data[group.id] = group;
       store.save(data);
       return jsonResponse(res, 201, { group });

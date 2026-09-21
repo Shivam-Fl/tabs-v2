@@ -182,3 +182,38 @@ test('the expense form refuses a submit while one is already in flight', () => {
 
   assert.match(handler, /finally \{[\s\S]*expenseSubmitting = false;/, 'the flag is never cleared');
 });
+
+// The create-group form had the same hole the expense form had: it clears its fields
+// only once the POST resolves, so a second submit while the first is in flight creates
+// a second group with the same name. Same guard, checked the same way — a module-level
+// flag the handler tests before it awaits and clears however it exits.
+test('the create-group form refuses a submit while one is already in flight', () => {
+  const script = readClientScript();
+
+  assert.match(script, /let groupSubmitting = false;/, 'no module-level busy flag');
+
+  const start = script.indexOf("getElementById('create-group-form').addEventListener");
+  assert.notStrictEqual(start, -1, 'create-group form handler not found');
+  const handler = script.slice(start, script.indexOf('\n});', start));
+
+  const checkAt = handler.indexOf('if (groupSubmitting) return;');
+  const setAt = handler.indexOf('groupSubmitting = true;');
+  const awaitAt = handler.indexOf('await api(');
+  assert.notStrictEqual(checkAt, -1, 'handler never bails out when already submitting');
+  assert.notStrictEqual(setAt, -1, 'handler never sets the busy flag');
+  assert.ok(checkAt < setAt, 'the flag is checked after it is set');
+  assert.ok(setAt < awaitAt, 'the flag must be set before the POST starts, not after');
+
+  // The flag has to cover the client-side validation return too, for the same reason it
+  // does on the expense form: setting it up front and clearing it around the fetch alone
+  // would wedge the form shut the first time a submit carried no members.
+  const tryAt = handler.indexOf('try {');
+  const earlyReturnAt = handler.indexOf(
+    "errorDiv.textContent = 'Please enter at least one member.'",
+  );
+  assert.notStrictEqual(tryAt, -1, 'handler has no try block to clear the flag from');
+  assert.notStrictEqual(earlyReturnAt, -1, 'members validation not found');
+  assert.ok(tryAt < earlyReturnAt, 'the validation return escapes the finally that clears the flag');
+
+  assert.match(handler, /finally \{[\s\S]*groupSubmitting = false;/, 'the flag is never cleared');
+});
