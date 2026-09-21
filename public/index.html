@@ -28,6 +28,11 @@
   .checkbox-group { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   .checkbox-group label { display: flex; align-items: center; gap: 4px; font-weight: 400; }
   .checkbox-group input { width: auto; margin: 0; }
+  /* Beats .checkbox-group input, which would otherwise stretch the share box to auto. */
+  .checkbox-group .share-input { width: 72px; padding: 4px 6px; font-size: 0.85rem; }
+  .radio-group { display: flex; gap: 16px; margin-bottom: 12px; }
+  .radio-group label { display: flex; align-items: center; gap: 4px; font-weight: 400; margin-bottom: 0; }
+  .radio-group input { width: auto; margin: 0; }
   .hidden { display: none; }
   .back-link { color: #2563eb; cursor: pointer; font-size: 0.9rem; margin-bottom: 12px; display: inline-block; }
   .back-link:hover { text-decoration: underline; }
@@ -63,6 +68,10 @@
       <label for="expense-payer">Paid by</label>
       <select id="expense-payer" required></select>
       <label>Split between</label>
+      <div class="radio-group">
+        <label><input type="radio" name="split-mode" value="equally" checked> Equally</label>
+        <label><input type="radio" name="split-mode" value="shares"> By shares</label>
+      </div>
       <div id="split-checkboxes" class="checkbox-group"></div>
       <div id="expense-error" class="error"></div>
       <button type="submit">Add Expense</button>
@@ -89,6 +98,22 @@ function toPaise(value) {
   if (typeof value !== 'string' || !/^[0-9]+(\.[0-9]{1,2})?$/.test(value.trim())) return null;
   const n = Math.round(parseFloat(value.trim()) * 100);
   return n > 0 ? n : null;
+}
+
+function splitMode() {
+  const checked = document.querySelector('input[name="split-mode"]:checked');
+  return checked ? checked.value : 'equally';
+}
+
+// A share box belongs to a member who is checked, in a form set to 'by shares'. Any
+// other state hides it, so a value left behind by an earlier edit — a member since
+// unchecked, or a return to equal split — cannot be collected at submit time.
+function syncShareInputs() {
+  const byShares = splitMode() === 'shares';
+  for (const label of document.querySelectorAll('#split-checkboxes label')) {
+    const checked = label.querySelector('input[type="checkbox"]').checked;
+    label.querySelector('.share-input').classList.toggle('hidden', !byShares || !checked);
+  }
 }
 
 async function api(path, method = 'GET', body = null) {
@@ -118,6 +143,11 @@ function showGroupView(groupId) {
   document.getElementById('view-create-group').classList.add('hidden');
   document.getElementById('view-group').classList.remove('hidden');
   currentGroupId = groupId;
+  // Opening a group starts on equal split: the mode is a choice about the expense being
+  // typed now, and carrying 'by shares' from the last group into a fresh one would make
+  // the default depend on where the user had been.
+  document.querySelector('input[name="split-mode"][value="equally"]').checked = true;
+  syncShareInputs();
   loadGroup(groupId);
 }
 
@@ -159,8 +189,30 @@ async function loadGroup(groupId) {
     cb.checked = true;
     label.appendChild(cb);
     label.appendChild(document.createTextNode(member.name));
+
+    const shareInput = document.createElement('input');
+    shareInput.type = 'number';
+    shareInput.min = '0';
+    shareInput.step = '1';
+    shareInput.placeholder = '0';
+    shareInput.className = 'share-input';
+    shareInput.setAttribute('aria-label', `Shares for ${member.name}`);
+    // A negative or fractional share is caught by min/step before the form's submit event
+    // fires, so the handler below never sees it — the browser refuses the submit and shows
+    // its own bubble. Every other rejection in this form is reported on the form's error
+    // line, so mirror it there; otherwise the one error a user gets for a share problem is
+    // in a different place from all the others.
+    shareInput.addEventListener('invalid', () => {
+      document.getElementById('expense-error').textContent =
+        'Shares must be whole numbers of 0 or more.';
+    });
+    label.appendChild(shareInput);
     splitDiv.appendChild(label);
   }
+
+  // The boxes were rebuilt, so their visibility has to be re-derived rather than
+  // inherited from the labels that were just thrown away.
+  syncShareInputs();
 
   // Render expenses
   const listDiv = document.getElementById('expense-list');
@@ -259,12 +311,35 @@ document.getElementById('expense-form').addEventListener('submit', async (e) => 
       return;
     }
 
-    await api(`/api/groups/${currentGroupId}/expenses`, 'POST', {
-      description,
-      amountPaise,
-      payerId,
-      splitMemberIds,
-    });
+    // Shares are read from the checked members only, at submit time: the boxes are the
+    // source of truth, not whatever was typed into them before a member was unchecked.
+    let shares = null;
+    if (splitMode() === 'shares') {
+      shares = [];
+      for (const cb of splitCheckboxes) {
+        const shareInput = cb.closest('label').querySelector('.share-input');
+        const raw = shareInput.value.trim();
+        // A blank box means this member takes no shares. Defaulting it to 0 lets the
+        // check below report the real problem ("nobody has a share") instead of a
+        // parse failure on an empty string.
+        const count = raw === '' ? 0 : Number(raw);
+        if (!Number.isInteger(count) || count < 0) {
+          errorDiv.textContent = 'Shares must be whole numbers of 0 or more.';
+          return;
+        }
+        shares.push({ memberId: cb.value, shares: count });
+      }
+      if (!shares.some((s) => s.shares > 0)) {
+        errorDiv.textContent = 'Give at least one member a share greater than 0.';
+        return;
+      }
+    }
+
+    const body = { description, amountPaise, payerId, splitMemberIds };
+    // Omitted entirely in equal mode, so the request is the same one this form sent
+    // before shares existed.
+    if (shares) body.shares = shares;
+    await api(`/api/groups/${currentGroupId}/expenses`, 'POST', body);
     document.getElementById('expense-desc').value = '';
     document.getElementById('expense-amount').value = '';
     document.getElementById('expense-desc').focus();
@@ -274,6 +349,16 @@ document.getElementById('expense-form').addEventListener('submit', async (e) => 
   } finally {
     expenseSubmitting = false;
   }
+});
+
+// Split mode controls whether the share boxes are live
+for (const radio of document.querySelectorAll('input[name="split-mode"]')) {
+  radio.addEventListener('change', syncShareInputs);
+}
+document.getElementById('split-checkboxes').addEventListener('change', (e) => {
+  // Unchecking a member takes their share box out of play rather than leaving a stale
+  // count in the form for the submit handler to pick up.
+  if (e.target.type === 'checkbox') syncShareInputs();
 });
 
 // Back link

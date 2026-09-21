@@ -164,6 +164,147 @@ test('rejects split containing a non-member', () => {
   );
 });
 
+function tripGroup() {
+  return createGroup({ name: 'Goa trip', members: ['Asha', 'Rahul', 'Meera'] });
+}
+
+const BIG_ROOM = {
+  description: 'Big room',
+  amountPaise: 600000,
+  payerId: 'Asha',
+  splitMemberIds: ['Asha', 'Rahul', 'Meera'],
+};
+
+test('addExpense with shares stores splitShares and keeps splitMemberIds', () => {
+  const updated = addExpense(tripGroup(), {
+    ...BIG_ROOM,
+    shares: [{ memberId: 'Asha', shares: 2 }, { memberId: 'Rahul', shares: 1 }, { memberId: 'Meera', shares: 1 }],
+  });
+  const exp = updated.expenses[0];
+  assert.deepStrictEqual(exp.splitShares, [
+    { memberId: 'Asha', shares: 2 },
+    { memberId: 'Rahul', shares: 1 },
+    { memberId: 'Meera', shares: 1 },
+  ]);
+  assert.deepStrictEqual(exp.splitMemberIds, ['Asha', 'Rahul', 'Meera']);
+});
+
+test('addExpense copies shares rather than keeping the caller array', () => {
+  const shares = [{ memberId: 'Asha', shares: 2 }, { memberId: 'Rahul', shares: 2 }];
+  const updated = addExpense(tripGroup(), {
+    ...BIG_ROOM,
+    splitMemberIds: ['Asha', 'Rahul'],
+    shares,
+  });
+  shares[0].shares = 99;
+  assert.strictEqual(updated.expenses[0].splitShares[0].shares, 2);
+});
+
+// AC-4: an equal-split expense has to stay byte-identical, which means the key must be
+// absent — `splitShares: undefined` would still show up in a JSON.stringify and in
+// Object.keys, and the GET handler's truthiness branch would be reading a key that
+// every expense now has.
+test('addExpense without shares adds no splitShares key at all', () => {
+  const updated = addExpense(tripGroup(), BIG_ROOM);
+  const exp = updated.expenses[0];
+  assert.ok(!('splitShares' in exp), 'equal-split expense grew a splitShares key');
+  assert.deepStrictEqual(Object.keys(exp), [
+    'id', 'description', 'amountPaise', 'payerId', 'splitMemberIds', 'createdAt',
+  ]);
+});
+
+test('addExpense rejects a non-array shares field with SHARES_INVALID', () => {
+  for (const bad of [null, 'shares', 3, {}]) {
+    assert.throws(
+      () => addExpense(tripGroup(), { ...BIG_ROOM, shares: bad }),
+      (err) => err instanceof InvalidInputError && err.code === 'SHARES_INVALID',
+      `accepted ${JSON.stringify(bad)} as shares`,
+    );
+  }
+});
+
+test('addExpense rejects a share that is negative, fractional or the wrong shape', () => {
+  for (const bad of [
+    { memberId: 'Asha', shares: -1 },
+    { memberId: 'Asha', shares: 1.5 },
+    { memberId: 'Asha', shares: '2' },
+    { memberId: 'Asha' },
+    { shares: 1 },
+    null,
+    'Asha',
+  ]) {
+    assert.throws(
+      () => addExpense(tripGroup(), { ...BIG_ROOM, shares: [bad] }),
+      (err) => err instanceof InvalidInputError && err.code === 'SHARES_INVALID',
+      `accepted ${JSON.stringify(bad)} as a share entry`,
+    );
+  }
+});
+
+test('addExpense rejects a share for a non-member with SHARES_MEMBER_UNKNOWN', () => {
+  assert.throws(
+    () =>
+      addExpense(tripGroup(), {
+        ...BIG_ROOM,
+        shares: [{ memberId: 'Asha', shares: 1 }, { memberId: 'Stranger', shares: 1 }],
+      }),
+    (err) => err instanceof InvalidInputError && err.code === 'SHARES_MEMBER_UNKNOWN',
+  );
+});
+
+test('addExpense rejects a share for a member outside the split with SHARES_NOT_IN_SPLIT', () => {
+  assert.throws(
+    () =>
+      addExpense(tripGroup(), {
+        ...BIG_ROOM,
+        splitMemberIds: ['Asha', 'Rahul'],
+        shares: [{ memberId: 'Asha', shares: 1 }, { memberId: 'Meera', shares: 1 }],
+      }),
+    (err) => err instanceof InvalidInputError && err.code === 'SHARES_NOT_IN_SPLIT',
+  );
+});
+
+test('addExpense rejects duplicate share members with SHARES_MEMBER_DUPLICATE', () => {
+  assert.throws(
+    () =>
+      addExpense(tripGroup(), {
+        ...BIG_ROOM,
+        shares: [{ memberId: 'Asha', shares: 1 }, { memberId: 'Asha', shares: 2 }],
+      }),
+    (err) => err instanceof InvalidInputError && err.code === 'SHARES_MEMBER_DUPLICATE',
+  );
+});
+
+// AC-3: all-zero shares must be refused, whether they arrive as explicit zeroes or as
+// no entries at all — both leave nothing to divide by.
+test('addExpense rejects all-zero shares with SHARES_ALL_ZERO', () => {
+  for (const shares of [
+    [{ memberId: 'Asha', shares: 0 }, { memberId: 'Rahul', shares: 0 }],
+    [{ memberId: 'Asha', shares: 0 }],
+    [],
+  ]) {
+    const group = tripGroup();
+    assert.throws(
+      () => addExpense(group, { ...BIG_ROOM, shares }),
+      (err) => err instanceof InvalidInputError && err.code === 'SHARES_ALL_ZERO',
+      `accepted ${JSON.stringify(shares)} as shares`,
+    );
+    assert.strictEqual(group.expenses.length, 0, 'a rejected expense must not be written');
+  }
+});
+
+test('addExpense accepts a single non-zero share among zeroes', () => {
+  const updated = addExpense(tripGroup(), {
+    ...BIG_ROOM,
+    shares: [
+      { memberId: 'Asha', shares: 0 },
+      { memberId: 'Rahul', shares: 0 },
+      { memberId: 'Meera', shares: 1 },
+    ],
+  });
+  assert.deepStrictEqual(updated.expenses[0].splitShares[2], { memberId: 'Meera', shares: 1 });
+});
+
 // AC-10: JSON.parse accepts `null`, arrays, strings and numbers as valid JSON, and
 // destructuring any of them raised a TypeError — which the server reported as a 500
 // with the internal destructuring message instead of a 400. The boundary belongs

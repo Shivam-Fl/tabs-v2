@@ -4,7 +4,7 @@ import path from 'node:path';
 import url from 'node:url';
 import { createGroup, addExpense, getExpenses, InvalidInputError } from './domain.js';
 import { createStore } from './store.js';
-import { splitEqual } from './money.js';
+import { splitEqual, splitByShares } from './money.js';
 
 let htmlCache = null;
 
@@ -148,7 +148,12 @@ async function handleRequest(req, res, store) {
       return errorResponse(res, 'GROUP_NOT_FOUND', 'Group not found', 404);
     }
     const expenses = getExpenses(group).map((exp) => {
-      const shares = splitEqual(exp.amountPaise, exp.splitMemberIds);
+      // `splitShares` is the stored input (share counts); `shares` is the computed
+      // output (paise per member). An expense without splitShares is an equal split —
+      // including every expense written before shares existed.
+      const shares = exp.splitShares
+        ? splitByShares(exp.amountPaise, exp.splitShares)
+        : splitEqual(exp.amountPaise, exp.splitMemberIds);
       return { ...exp, shares };
     });
     // The UI builds the payer select, the split checkboxes and every share
@@ -180,7 +185,9 @@ async function handleRequest(req, res, store) {
       const expense = updatedGroup.expenses[updatedGroup.expenses.length - 1];
       // Compute the shares before the write: anything that throws in between
       // would otherwise commit an expense that every later read fails on.
-      const shares = splitEqual(expense.amountPaise, expense.splitMemberIds);
+      const shares = expense.splitShares
+        ? splitByShares(expense.amountPaise, expense.splitShares)
+        : splitEqual(expense.amountPaise, expense.splitMemberIds);
       data[route.groupId] = updatedGroup;
       store.save(data);
       return jsonResponse(res, 201, { expense: { ...expense, shares } });
