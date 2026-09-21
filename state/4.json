@@ -142,5 +142,7 @@
     "gates": {},
     "decided_at": "2026-09-21T21:25:25.529Z"
   },
-  "implemented_version": 1
+  "implemented_version": 1,
+  "resume_at": "plan",
+  "stopped_at": "plan"
 }
