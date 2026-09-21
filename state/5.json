@@ -60,5 +60,7 @@
       "plan_approval": true
     },
     "decided_at": "2026-09-21T21:22:41.848Z"
-  }
+  },
+  "resume_at": "plan",
+  "stopped_at": "plan"
 }
