@@ -2,7 +2,14 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
-import { createGroup, addExpense, getExpenses, InvalidInputError } from './domain.js';
+import {
+  createGroup,
+  addExpense,
+  getExpenses,
+  calculateBalances,
+  calculateSettlement,
+  InvalidInputError,
+} from './domain.js';
 import { createStore } from './store.js';
 import { splitEqual, splitByShares } from './money.js';
 
@@ -59,6 +66,20 @@ function errorResponse(res, code, message, statusCode = 400) {
 
 function parseRoute(urlPath) {
   const pathname = url.parse(urlPath).pathname;
+  // The three group sub-resources are matched together, in the order the group screen
+  // reads them. The order is not load-bearing — none of these patterns matches either of
+  // the others' paths — but a reader looking for "what is under /api/groups/:id" gets all
+  // of it in one block instead of finding /expenses and wondering what else is down here.
+  // /api/groups/:id/balances
+  const balancesMatch = pathname.match(/^\/api\/groups\/([^/]+)\/balances$/);
+  if (balancesMatch) {
+    return { resource: 'group_balances', groupId: balancesMatch[1] };
+  }
+  // /api/groups/:id/settlement
+  const settlementMatch = pathname.match(/^\/api\/groups\/([^/]+)\/settlement$/);
+  if (settlementMatch) {
+    return { resource: 'group_settlement', groupId: settlementMatch[1] };
+  }
   // /api/groups/:id/expenses
   const expenseMatch = pathname.match(/^\/api\/groups\/([^/]+)\/expenses$/);
   if (expenseMatch) {
@@ -149,6 +170,50 @@ async function handleRequest(req, res, store) {
   }
 
   if (route.resource === 'groups') {
+    return errorResponse(res, 'METHOD_NOT_ALLOWED', 'Method not allowed', 405);
+  }
+
+  // GET /api/groups/:id/balances
+  if (route.resource === 'group_balances' && req.method === 'GET') {
+    const data = store.load();
+    const group = data[route.groupId];
+    if (!group) {
+      return errorResponse(res, 'GROUP_NOT_FOUND', 'Group not found', 404);
+    }
+    try {
+      return jsonResponse(res, 200, { balances: calculateBalances(group) });
+    } catch (err) {
+      // The invariant from project.md, not a bad request: the body of the group on disk
+      // is inconsistent, and the client cannot fix it by sending something different.
+      return errorResponse(res, 'BALANCES_INVARIANT', err.message, 500);
+    }
+  }
+
+  if (route.resource === 'group_balances') {
+    return errorResponse(res, 'METHOD_NOT_ALLOWED', 'Method not allowed', 405);
+  }
+
+  // GET /api/groups/:id/settlement
+  if (route.resource === 'group_settlement' && req.method === 'GET') {
+    const data = store.load();
+    const group = data[route.groupId];
+    if (!group) {
+      return errorResponse(res, 'GROUP_NOT_FOUND', 'Group not found', 404);
+    }
+    try {
+      const balances = calculateBalances(group);
+      return jsonResponse(res, 200, {
+        settlement: calculateSettlement(balances, group.members),
+      });
+    } catch (err) {
+      // The same code as /balances on purpose. The settlement is derived from the same
+      // balances, so the same corrupt group must not look like a different failure — or,
+      // worse, like an internal bug — depending on which URL it was read through.
+      return errorResponse(res, 'BALANCES_INVARIANT', err.message, 500);
+    }
+  }
+
+  if (route.resource === 'group_settlement') {
     return errorResponse(res, 'METHOD_NOT_ALLOWED', 'Method not allowed', 405);
   }
 

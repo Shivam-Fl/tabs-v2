@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { splitEqual, splitByShares } from './money.js';
 
 export class InvalidInputError extends Error {
   constructor(code, message) {
@@ -168,4 +169,90 @@ export function addExpense(group, input) {
 
 export function getExpenses(group) {
   return [...group.expenses];
+}
+
+/**
+ * Per-member balances for a group: paise paid minus paise owed, in `group.members`
+ * order. Positive means the group owes them, negative means they owe the group.
+ */
+export function calculateBalances(group) {
+  const balances = new Map(group.members.map((member) => [member.id, 0]));
+
+  for (const expense of group.expenses) {
+    balances.set(
+      expense.payerId,
+      (balances.get(expense.payerId) || 0) + expense.amountPaise,
+    );
+    // The shares are re-derived rather than read back from the expense, because the
+    // stored shape keeps the split *inputs* (the member list, the share counts) and the
+    // resulting paise only exist in the response. Re-deriving through money.js is also
+    // what keeps the remainder distribution identical to the one the UI displayed.
+    const shares = expense.splitShares
+      ? splitByShares(expense.amountPaise, expense.splitShares)
+      : splitEqual(expense.amountPaise, expense.splitMemberIds);
+    for (const share of shares) {
+      balances.set(share.memberId, (balances.get(share.memberId) || 0) - share.paise);
+    }
+  }
+
+  const result = group.members.map((member) => ({
+    memberId: member.id,
+    paise: balances.get(member.id),
+  }));
+
+  // Every expense credits its payer with exactly the amount it debits the split, so this
+  // total is zero for anything the API could have written. A non-zero total means an
+  // expense credited or debited an id that `group.members` does not list, and the
+  // projection above dropped it — the store has been edited or migrated wrongly. Fail
+  // loudly (project.md: balances always net to zero): a settlement built on numbers that
+  // do not add up sends real money the wrong way, which is worse than an error page.
+  const sum = result.reduce((total, entry) => total + entry.paise, 0);
+  if (sum !== 0) {
+    throw new Error(`Balances do not net to zero: sum was ${sum} paise`);
+  }
+  return result;
+}
+
+/**
+ * The transfers that clear the group: largest debtor pays largest creditor, repeatedly,
+ * with equal magnitudes resolved by `members` insertion order (ADR-0003). Deterministic
+ * on purpose — the same balances must always produce the same list, or nobody trusts it.
+ */
+export function calculateSettlement(balances, members) {
+  const positions = new Map(members.map((member, index) => [member.id, index]));
+  const remaining = new Map(balances.map((entry) => [entry.memberId, entry.paise]));
+
+  // Recomputed every pass, not sorted once: a transfer can shrink the head of a list
+  // below the next member's balance, so the leader has to be re-picked rather than
+  // assumed. The comparator is a total order over distinct member ids, which is what
+  // makes the result identical across runs and hosts.
+  const sideByMagnitude = (sign) =>
+    [...remaining.entries()]
+      .filter(([, paise]) => (sign < 0 ? paise < 0 : paise > 0))
+      .map(([memberId, paise]) => ({ memberId, paise }))
+      .sort((a, b) => {
+        const byMagnitude = Math.abs(b.paise) - Math.abs(a.paise);
+        return byMagnitude !== 0
+          ? byMagnitude
+          : positions.get(a.memberId) - positions.get(b.memberId);
+      });
+
+  const transfers = [];
+  for (;;) {
+    const debtors = sideByMagnitude(-1);
+    const creditors = sideByMagnitude(1);
+    // Nothing left on one side clears the group: with balances that net to zero the two
+    // sides run out together, and calculateBalances is what guarantees that.
+    if (debtors.length === 0 || creditors.length === 0) break;
+
+    const debtor = debtors[0];
+    const creditor = creditors[0];
+    // The lesser of the two magnitudes, and both sides are strictly non-zero above, so
+    // this is always at least one paise — no transfer of nothing is ever recorded.
+    const amountPaise = Math.min(-debtor.paise, creditor.paise);
+    transfers.push({ from: debtor.memberId, to: creditor.memberId, amountPaise });
+    remaining.set(debtor.memberId, debtor.paise + amountPaise);
+    remaining.set(creditor.memberId, creditor.paise - amountPaise);
+  }
+  return transfers;
 }
