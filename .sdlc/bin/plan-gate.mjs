@@ -17,6 +17,21 @@ const { ledger } = await readLedger(repoOf(), Number(wo.issue)).catch(() => ({ l
 const gates = effectiveGates(cfg.gates ?? {}, ledger?.flow_plan?.gates ?? {});
 const { gate, reason } = planGate(wo, { ...cfg, gates });
 
+// How many times this plan has already been sent back. The reviewer needs it, because the
+// right bar is not the same on round one and round four.
+//
+// Three rejections on one issue, each naming entirely different defects, each of them real —
+// and the fourth plan was approved after the budget had spent seven of its ten attempts. The
+// reviewer was not wrong any of those times; it was answering "is every detail pinned?", a
+// question that always has another answer, while the implementer's own contract already makes
+// it responsible for the details a plan does not spell out.
+const rejections = await gh(['issue', 'view', String(wo.issue), '--json', 'comments',
+  '--jq', '[.comments[] | select(.body | startswith("## Plan review: rejected") or ' +
+          'startswith("## Plan review: could not verify"))] | length'])
+  .then((n) => Number(n.trim()) || 0)
+  .catch(() => 0);
+setOutput('rejections', String(rejections));
+
 setOutput('gate', gate);
 setOutput('reason', reason);
 setOutput('confidence', String(wo.confidence ?? ''));

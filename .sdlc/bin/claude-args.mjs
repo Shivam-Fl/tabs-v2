@@ -26,6 +26,10 @@ const TOOLS = {
   review_design:     'Bash,Read,Grep,Glob,Write',
   qa:                'Bash,Read,Write,Grep,Glob',
   root_cause:        'Bash,Read,Write,Grep,Glob',
+  // NO Edit, deliberately. The agent that diagnoses a failure must not also be the agent that
+  // makes the evidence disappear — and a framework defect it could patch itself would leave
+  // nothing behind to audit.
+  triage:            'Bash,Read,Grep,Glob,Write',
   librarian:         'Bash,Read,Edit,Write,Grep,Glob',
   release:           'Bash,Read,Edit,Write',
   maintainer:        'Bash,Read,Grep,Glob,Write',
@@ -41,7 +45,7 @@ const DEFAULT_TURNS = {
   plan: 40, plan_proposer: 40, plan_critic: 40, plan_arbiter: 40, plan_reviewer: 30,
   debug: 60, implement: 60,
   review: 40, review_correctness: 40, review_design: 40,
-  qa: 120, root_cause: 40, librarian: 50, release: 25, maintainer: 60, router: 15, project: 50,
+  qa: 120, root_cause: 40, triage: 40, librarian: 50, release: 25, maintainer: 60, router: 15, project: 50,
 };
 
 // A council member with no explicit setting inherits the stage's, so configuring just

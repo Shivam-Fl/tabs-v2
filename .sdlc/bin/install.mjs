@@ -370,6 +370,8 @@ limits:
   minutes:  600            # wall clock per issue. Generous on purpose: a single plan
                          # council can legitimately run for hours, and a budget tighter
                          # than one stage terminates work that was going fine.
+  runtime_retries: 4       # provider-outage cooldowns one stage may wait through before it
+                           # stops for a person. The waits back off 20/40/80/120 minutes.
   max_in_flight: 2         # how many issues may be mid-pipeline at once. Every agent stage
 
                            # runs on ONE token, and ten concurrent sessions exhausted it in a

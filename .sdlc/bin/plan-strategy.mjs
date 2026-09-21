@@ -2,6 +2,7 @@
 // Resolves, for one issue: which agent plans it, and how much deliberation it gets.
 // Emitted as step outputs so the workflow's conditions stay readable.
 import { ghJson, setOutput, loadConfig, repo as repoOf } from './lib/actions.js';
+import { writeFileSync } from 'node:fs';
 import { agentForIssue, councilFor } from './lib/routing.js';
 import { readLedger } from './lib/state-io.js';
 
@@ -10,6 +11,24 @@ const cfg = await loadConfig();
 const data = await ghJson(['issue', 'view', issue, '--json', 'labels,title']);
 
 const agent = agentForIssue({ labels: data.labels }, cfg);
+
+// A plan already approved is not replanned. It is posted.
+//
+// Everything between here and the post — validation, the gate, the reviewer — has already
+// run and said yes. Re-running the stage from the top to repair a step after that point
+// discards the expensive half of the work to retry the cheap half, which is how one failed
+// `gh` call cost a second three-agent council.
+const { ledger: pre } = await readLedger(repoOf(), Number(issue)).catch(() => ({ ledger: null }));
+if (pre?.approved_work_order) {
+  writeFileSync('work-order.json', JSON.stringify(pre.approved_work_order, null, 2));
+  setOutput('agent', agent);
+  setOutput('mode', 'resume');
+  setOutput('pack', '');
+  process.stdout.write(
+    `#${issue}: a plan for this issue was already approved (v${pre.approved_work_order.version ?? '?'}) ` +
+    'and never posted — posting it rather than planning again\n');
+  process.exit(0);
+}
 
 // The Router may ask for LESS deliberation on a ticket that does not need it — a council is
 // for plans that are expensive to get wrong, and a wording change is not one. It may only

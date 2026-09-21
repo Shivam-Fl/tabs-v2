@@ -23,28 +23,48 @@ runtime:
   # Spend where a mistake is hardest to recover from: the diagnosis every later stage
   # inherits, and the last read before code is trusted.
   model:
+    # Four models, four separate $60 monthly pools, assigned by what each is measurably good
+    # at. Nothing on a $15 pool: Kimi K3 and Qwen3.8 Max burn their allowance four times
+    # faster per dollar of work, and the dashboard sums PERCENTAGES, so a cheap pool is the
+    # expensive choice.
+    #
+    # deepseek-v4.1-flash — Terminal-Bench 2.1 90.6, DeepSWE v1.1 74.2%, Codeforces 3471,
+    #   GPQA-D 90.9, 1M context. "Flash" understates it: on agentic coding it is the strongest
+    #   of the four, and its per-token cost is the lowest, so the pool goes furthest here.
+    #   Gets the stages that read and write code, which are also the stages that run most.
+    # qwen3.7-plus — SWE-bench Verified 77.7, MCP Atlas 73.2, BFCL v4 72.9, 1M context. The
+    #   best all-round judgement of the four; weak on deep reasoning benchmarks (CritPt 9.1),
+    #   which is why it judges plans rather than derives algorithms.
+    # minimax-m3 — BrowseComp 83.5, MCP Atlas 74.2, native multimodality. It is the only one
+    #   built to drive a browser and read what it sees, so it gets QA.
+    # qwen3.6-plus — the predecessor of 3.7 and measurably behind it (60.58 vs 61.72
+    #   composite). Used where a second, differently-wrong opinion is the point.
     plan:               qwen3.7-plus
-    plan_proposer:      qwen3.7-plus
-    plan_critic:        deepseek-v4.1-flash
-    plan_arbiter:       minimax-m3
-    plan_reviewer:      qwen3.6-plus
-    debug:              qwen3.7-plus
-    implement:          qwen3.6-plus
-    review:             deepseek-v4.1-flash
-    review_correctness: qwen3.7-plus
-    review_design:      minimax-m3
-    qa:                 minimax-m3
-    root_cause:         deepseek-v4.1-flash
-    librarian:          deepseek-v4-flash
-    release:            deepseek-v4-flash
-    maintainer:         kimi-k3
+    plan_proposer:      deepseek-v4.1-flash   # writes the first full plan against real code
+    plan_critic:        qwen3.6-plus          # a different family fails differently, which is
+                                              # the only reason a council beats one agent
+    plan_arbiter:       qwen3.7-plus          # judges the critique and sets confidence
+    plan_reviewer:      qwen3.7-plus          # the last gate before code is written
+    debug:              deepseek-v4.1-flash   # reproduces and reads the failing path
+    implement:          deepseek-v4.1-flash   # the most-run stage, on the best coder
+    review:             qwen3.7-plus
+    review_correctness: deepseek-v4.1-flash   # does it work — code reading
+    review_design:      qwen3.7-plus          # should it be written this way — judgement
+    qa:                 minimax-m3            # drives a live browser and reads screenshots
+    root_cause:         qwen3.7-plus          # decides whether the original diagnosis was wrong
+    triage:             qwen3.7-plus          # reads a whole failed run's log and decides what
+                                              # the failure means. Its wrong answer spends
+                                              # another agent's entire run, so it gets judgement
+    librarian:          qwen3.6-plus
+    release:            qwen3.6-plus
+    maintainer:         qwen3.7-plus          # holds the whole project; the widest context
     # Decides the stack once, for the life of the repo. The one place to spend the most
     # capable model you have.
-    project:            kimi-k3
+    project:            qwen3.7-plus
     # Decides WHICH STAGES a ticket needs, and only when the free rules decline. It runs on
     # every issue they miss, so this is the one step where model cost is a tax on the whole
-    # backlog. Never Opus: classifying a ticket is not the hard part of this pipeline.
-    router:             deepseek-v4-flash
+    # backlog.
+    router:             qwen3.6-plus
 
   # Turn limits. EMPTY MEANS NO LIMIT, which is the default and usually right: the action
   # validates the count after the run, so exceeding a cap discards completed work instead of
@@ -140,10 +160,19 @@ verify:
   e2e:       ""
 
 gates:
-  plan_approval:     true   # a HUMAN approves the work order before any code is written
+  # UNATTENDED OVERNIGHT RUN. The two human gates are off deliberately, because a gate with
+  # nobody awake behind it is not a safeguard — it is a stop. What replaces each one is named
+  # below; none of the verification is skipped, only the waiting for a person.
+  plan_approval:     false  # the plan reviewer below is the gate instead: it verifies the
+                            # diagnosis and the caller analysis itself and sends a bad plan
+                            # back with objections rather than parking it
   plan_review_agent: true   # when plan_approval is off, an agent reviews instead of nobody
-  min_confidence:    70     # a plan below this reaches a human regardless of the gates above
-  merge_approval:    true
+  min_confidence:    55     # open-weight models self-report lower than Claude does on the
+                            # same plan. Every plan is reviewed regardless; this number only
+                            # decides whether a person is woken, and tonight nobody is.
+  merge_approval:    false  # a PR merges when the gate is green, the review is answered and
+                            # QA passes — the three things a person would have checked. This
+                            # repo has no branch protection, so the merge can actually complete.
   qa_files_issues:   true   # QA opens issues for bugs outside this PR's scope
   min_route_confidence: 70   # a ROUTE below this reaches a human, absent counts as below
   max_route_risk:       70   # and so does a route through something this expensive to get wrong
@@ -153,6 +182,11 @@ limits:
   minutes:  600            # wall clock per issue. Generous on purpose: a single plan
                          # council can legitimately run for hours, and a budget tighter
                          # than one stage terminates work that was going fine.
+  runtime_retries: 4       # provider-outage cooldowns one stage may wait through before it
+                           # stops for a person. The waits back off 20/40/80/120 minutes, so
+                           # four cover about four hours — long enough to sleep through an
+                           # open-model quota window.
+
   max_in_flight: 2         # how many issues may be mid-pipeline at once. Every agent stage
 
                            # runs on ONE token, and ten concurrent sessions exhausted it in a
