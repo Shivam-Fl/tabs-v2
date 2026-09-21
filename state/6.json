@@ -15,7 +15,15 @@
     "minutes": 0,
     "cap_minutes": 120
   },
-  "touch_paths": [],
+  "touch_paths": [
+    "src/money.js",
+    "src/domain.js",
+    "src/server.js",
+    "public/index.html",
+    "test/money.test.js",
+    "test/domain.test.js",
+    "test/server.test.js"
+  ],
   "acceptance": [],
   "planned_route": [
     "plan",
