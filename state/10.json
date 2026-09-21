@@ -1,6 +1,6 @@
 {
   "issue": 10,
-  "pr": null,
+  "pr": 11,
   "state": "implementing",
   "owner": "implementer",
   "lock_expires": "2026-09-21T23:08:50.294Z",
@@ -80,5 +80,6 @@
     "matched_rule": null,
     "gates": {},
     "decided_at": "2026-09-21T20:04:00.034Z"
-  }
+  },
+  "implemented_version": 1
 }
