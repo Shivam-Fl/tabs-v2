@@ -1,0 +1,10 @@
+{
+  "name": "tabs-v2",
+  "private": true,
+  "scripts": {
+    "sdlc:verify": "node --test test/",
+    "sdlc:serve": "node src/server.js",
+    "sdlc:seed": "node bin/seed.js",
+    "sdlc:ready": "curl -sf http://localhost:3000/"
+  }
+}
