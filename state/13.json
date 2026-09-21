@@ -17,8 +17,13 @@
   },
   "touch_paths": [],
   "acceptance": [],
-  "planned_route": [],
-  "on_complete": null,
+  "planned_route": [
+    "plan",
+    "implement",
+    "review",
+    "qa"
+  ],
+  "on_complete": "merge",
   "artifacts": {},
   "failure_history": [],
   "review_history": [],
@@ -30,6 +35,18 @@
       "at": "2026-09-21T20:31:14.057Z",
       "agent": "intake",
       "action": "-> planning"
+    },
+    {
+      "at": "2026-09-21T20:32:42.726Z",
+      "agent": "router",
+      "action": "route plan -> implement -> review -> qa (no deterministic rule matched — ordinary bug with repro steps and suspected cause, confidence 85)"
     }
-  ]
+  ],
+  "flow_plan": {
+    "kind": "bug",
+    "confidence": 85,
+    "matched_rule": "no deterministic rule matched — ordinary bug with repro steps and suspected cause",
+    "gates": {},
+    "decided_at": "2026-09-21T20:32:42.726Z"
+  }
 }
