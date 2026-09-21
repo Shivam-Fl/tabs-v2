@@ -60,16 +60,19 @@
       "at": "2026-09-21T21:24:14.782Z",
       "agent": "intake",
       "action": "-> planning"
+    },
+    {
+      "at": "2026-09-21T21:25:36.909Z",
+      "agent": "router",
+      "action": "route plan -> implement -> review -> qa (model, confidence 85)"
     }
   ],
   "flow_plan": {
     "kind": "feature",
     "confidence": 85,
-    "matched_rule": "no deterministic rule matched — router intake for feature work",
-    "gates": {
-      "plan_approval": true
-    },
-    "decided_at": "2026-09-21T21:22:41.848Z"
+    "matched_rule": null,
+    "gates": {},
+    "decided_at": "2026-09-21T21:25:36.909Z"
   },
   "resume_at": "plan",
   "stopped_at": "plan"
