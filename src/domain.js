@@ -8,7 +8,18 @@ export class InvalidInputError extends Error {
   }
 }
 
-export function createGroup({ name, members }) {
+// `null`, an array, a string and a number are all valid JSON, and destructuring any of
+// them throws a TypeError that the server reports as a 500 with the destructuring
+// message leaked to the client. Refuse them here so they leave as a 400 instead.
+function requireObject(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new InvalidInputError('INVALID_JSON', 'Request body must be a JSON object');
+  }
+}
+
+export function createGroup(input) {
+  requireObject(input);
+  const { name, members } = input;
   if (typeof name !== 'string' || name.trim() === '') {
     throw new InvalidInputError('NAME_REQUIRED', 'Group name is required');
   }
@@ -40,8 +51,9 @@ export function createGroup({ name, members }) {
   };
 }
 
-export function addExpense(group, expense) {
-  const { description, amountPaise, payerId, splitMemberIds } = expense;
+export function addExpense(group, input) {
+  requireObject(input);
+  const { description, amountPaise, payerId, splitMemberIds } = input;
 
   if (typeof description !== 'string' || description.trim() === '') {
     throw new InvalidInputError('DESCRIPTION_REQUIRED', 'Description is required');

@@ -20,16 +20,24 @@ function parseBody(req, limit = 64 * 1024) {
   return new Promise((resolve, reject) => {
     let body = '';
     let size = 0;
+    let settled = false;
     req.on('data', (chunk) => {
+      if (settled) return;
       size += chunk.length;
       if (size > limit) {
-        req.destroy();
+        // Do not req.destroy() here. Destroying the socket tears the connection down
+        // before the route can write its 400, so the client sees a closed connection
+        // and no status at all instead of an error response. Stop accumulating, let
+        // the stream drain, and hand the rejection to the handler that answers.
+        settled = true;
         reject(new Error('Request body too large'));
         return;
       }
       body += chunk;
     });
-    req.on('end', () => resolve(body));
+    req.on('end', () => {
+      if (!settled) resolve(body);
+    });
     req.on('error', reject);
   });
 }

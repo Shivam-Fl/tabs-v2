@@ -163,3 +163,37 @@ test('rejects split containing a non-member', () => {
     (err) => err instanceof InvalidInputError && err.code === 'SPLIT_MEMBER_UNKNOWN',
   );
 });
+
+// AC-10: JSON.parse accepts `null`, arrays, strings and numbers as valid JSON, and
+// destructuring any of them raised a TypeError — which the server reported as a 500
+// with the internal destructuring message instead of a 400. The boundary belongs
+// here, next to the other input guards.
+for (const [label, body] of [
+  ['null', null],
+  ['an array', []],
+  ['a string', 'group'],
+  ['a number', 123],
+]) {
+  test(`createGroup rejects ${label} with INVALID_JSON`, () => {
+    assert.throws(
+      () => createGroup(body),
+      (err) => err instanceof InvalidInputError && err.code === 'INVALID_JSON',
+    );
+  });
+}
+
+for (const [label, body] of [
+  ['null', null],
+  ['an array', []],
+  ['a string', 'expense'],
+  ['a number', 123],
+]) {
+  test(`addExpense rejects ${label} expense with INVALID_JSON`, () => {
+    const group = createGroup({ name: 'Test', members: ['Alice', 'Bob'] });
+    assert.throws(
+      () => addExpense(group, body),
+      (err) => err instanceof InvalidInputError && err.code === 'INVALID_JSON',
+    );
+    assert.strictEqual(group.expenses.length, 0, 'a rejected expense must not be written');
+  });
+}

@@ -113,3 +113,72 @@ test('no innerHTML assignment in the client interpolates a value', () => {
     `innerHTML assignment interpolates a value; use createElement + textContent:\n${offenders.join('\n')}`,
   );
 });
+
+function readClientScript() {
+  const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  return html.slice(html.indexOf('<script>'), html.lastIndexOf('</script>'));
+}
+
+// The client is one inline <script> in a static HTML file. node --test has no DOM and
+// the work order forbids adding a dependency, so the only way to exercise the shipped
+// function is to lift its source out of the file and evaluate it. Every top-level
+// declaration in that script closes at column 0, so "\n}" ends the function.
+function clientFunction(name) {
+  const script = readClientScript();
+  const start = script.indexOf(`function ${name}(`);
+  assert.notStrictEqual(start, -1, `${name} not found in public/index.html`);
+  const end = script.indexOf('\n}', start);
+  assert.notStrictEqual(end, -1, `${name} does not close at column 0`);
+  return new Function(`${script.slice(start, end + 2)}\nreturn ${name};`)();
+}
+
+// AC-12: parseFloat('1,234') is 1, so a ₹1,234 expense was recorded as ₹1.00 and the
+// user was never told. The separator has to be refused, not silently folded away.
+test('toPaise accepts plain rupee amounts and refuses thousands separators', () => {
+  const toPaise = clientFunction('toPaise');
+
+  assert.strictEqual(toPaise('9000'), 900000);
+  assert.strictEqual(toPaise('250'), 25000);
+  assert.strictEqual(toPaise('83.33'), 8333);
+  assert.strictEqual(toPaise(' 9000 '), 900000);
+
+  assert.strictEqual(toPaise('1,234'), null);
+  assert.strictEqual(toPaise('abc'), null);
+  assert.strictEqual(toPaise('-5'), null);
+  assert.strictEqual(toPaise('0'), null);
+  assert.strictEqual(toPaise(''), null);
+  assert.strictEqual(toPaise('1.234'), null);
+});
+
+// AC-11: the form is cleared only after the POST resolves, so a second submit while
+// the first is in flight posted a second expense. requestSubmit() cannot be driven
+// from here, so what is checkable is the guard's shape — a module-level flag that the
+// handler tests before it awaits, and clears however it exits.
+test('the expense form refuses a submit while one is already in flight', () => {
+  const script = readClientScript();
+
+  assert.match(script, /let expenseSubmitting = false;/, 'no module-level busy flag');
+
+  const start = script.indexOf("getElementById('expense-form').addEventListener");
+  assert.notStrictEqual(start, -1, 'expense form handler not found');
+  const handler = script.slice(start, script.indexOf('\n});', start));
+
+  const checkAt = handler.indexOf('if (expenseSubmitting) return;');
+  const setAt = handler.indexOf('expenseSubmitting = true;');
+  const awaitAt = handler.indexOf('await api(');
+  assert.notStrictEqual(checkAt, -1, 'handler never bails out when already submitting');
+  assert.notStrictEqual(setAt, -1, 'handler never sets the busy flag');
+  assert.ok(checkAt < setAt, 'the flag is checked after it is set');
+  assert.ok(setAt < awaitAt, 'the flag must be set before the POST starts, not after');
+
+  // The flag has to cover the client-side validation returns too. Setting it up front
+  // and only clearing it around the fetch would wedge the form shut the first time an
+  // amount failed validation, because that path returns before the try block.
+  const tryAt = handler.indexOf('try {');
+  const earlyReturnAt = handler.indexOf("errorDiv.textContent = 'Please enter a valid positive amount.'");
+  assert.notStrictEqual(tryAt, -1, 'handler has no try block to clear the flag from');
+  assert.notStrictEqual(earlyReturnAt, -1, 'amount validation not found');
+  assert.ok(tryAt < earlyReturnAt, 'the validation return escapes the finally that clears the flag');
+
+  assert.match(handler, /finally \{[\s\S]*expenseSubmitting = false;/, 'the flag is never cleared');
+});

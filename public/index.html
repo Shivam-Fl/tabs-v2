@@ -83,8 +83,12 @@ function formatRupees(paise) {
 }
 
 function toPaise(value) {
-  const n = Math.round(parseFloat(value) * 100);
-  return Number.isFinite(n) && n > 0 ? n : null;
+  // parseFloat stops at the first character it cannot use, so parseFloat('1,234') is 1
+  // and a ₹1,234 expense was silently recorded as ₹1.00. Refuse anything that is not a
+  // plain number with at most two decimals rather than guessing what was meant.
+  if (typeof value !== 'string' || !/^[0-9]+(\.[0-9]{1,2})?$/.test(value.trim())) return null;
+  const n = Math.round(parseFloat(value.trim()) * 100);
+  return n > 0 ? n : null;
 }
 
 async function api(path, method = 'GET', body = null) {
@@ -99,6 +103,9 @@ async function api(path, method = 'GET', body = null) {
 }
 
 let currentGroupId = null;
+// The form is cleared only once the POST resolves, so a second submit while the first
+// is in flight posts a second expense. The handler holds this until it is done.
+let expenseSubmitting = false;
 
 function showCreateView() {
   document.getElementById('view-create-group').classList.remove('hidden');
@@ -226,27 +233,32 @@ document.getElementById('create-group-form').addEventListener('submit', async (e
 // Expense form
 document.getElementById('expense-form').addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (expenseSubmitting) return;
+  expenseSubmitting = true;
   const errorDiv = document.getElementById('expense-error');
   errorDiv.textContent = '';
 
-  const description = document.getElementById('expense-desc').value.trim();
-  const amountRaw = document.getElementById('expense-amount').value;
-  const payerId = document.getElementById('expense-payer').value;
-  const splitCheckboxes = document.querySelectorAll('#split-checkboxes input:checked');
-  const splitMemberIds = Array.from(splitCheckboxes).map((cb) => cb.value);
-
-  const amountPaise = toPaise(amountRaw);
-  if (!amountPaise) {
-    errorDiv.textContent = 'Please enter a valid positive amount.';
-    return;
-  }
-
-  if (splitMemberIds.length === 0) {
-    errorDiv.textContent = 'Select at least one member to split between.';
-    return;
-  }
-
+  // The flag is set above but only cleared in the finally, and the validation returns
+  // below sit inside the try on purpose: clearing it around the fetch alone would wedge
+  // the form shut the first time an amount failed validation.
   try {
+    const description = document.getElementById('expense-desc').value.trim();
+    const amountRaw = document.getElementById('expense-amount').value;
+    const payerId = document.getElementById('expense-payer').value;
+    const splitCheckboxes = document.querySelectorAll('#split-checkboxes input:checked');
+    const splitMemberIds = Array.from(splitCheckboxes).map((cb) => cb.value);
+
+    const amountPaise = toPaise(amountRaw);
+    if (!amountPaise) {
+      errorDiv.textContent = 'Please enter a valid positive amount.';
+      return;
+    }
+
+    if (splitMemberIds.length === 0) {
+      errorDiv.textContent = 'Select at least one member to split between.';
+      return;
+    }
+
     await api(`/api/groups/${currentGroupId}/expenses`, 'POST', {
       description,
       amountPaise,
@@ -259,6 +271,8 @@ document.getElementById('expense-form').addEventListener('submit', async (e) => 
     loadGroup(currentGroupId);
   } catch (err) {
     errorDiv.textContent = err.message;
+  } finally {
+    expenseSubmitting = false;
   }
 });
 

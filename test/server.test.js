@@ -280,3 +280,113 @@ test('unknown route returns 404', async () => {
     close();
   }
 });
+
+// Sends a body that is already a string, so cases like 'null' and '[]' reach the
+// server as the JSON the client would actually send.
+async function postRaw(path, rawBody, baseUrl) {
+  const url = new URL(path, baseUrl);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: rawBody,
+  });
+  const data = await res.json();
+  return { status: res.status, data };
+}
+
+// AC-10: all of these are valid JSON and none of them is an object.
+const NON_OBJECT_BODIES = ['null', '[]', '"string"', '123'];
+
+for (const raw of NON_OBJECT_BODIES) {
+  test(`POST /api/groups with body ${raw} returns 400 INVALID_JSON, not 500`, async () => {
+    const store = createStore({ memory: true });
+    const { close, url } = await start({ port: 0, store });
+    try {
+      const { status, data } = await postRaw('/api/groups', raw, url);
+      assert.strictEqual(status, 400);
+      assert.strictEqual(data.error.code, 'INVALID_JSON');
+      // The old failure was a TypeError message leaking out under a 500.
+      assert.doesNotMatch(data.error.message, /destructur/i);
+      assert.deepStrictEqual(store.load(), {}, 'a rejected body must write nothing');
+    } finally {
+      close();
+    }
+  });
+}
+
+for (const raw of NON_OBJECT_BODIES) {
+  test(`POST /api/groups/:id/expenses with body ${raw} returns 400 INVALID_JSON, not 500`, async () => {
+    const store = createStore({ memory: true });
+    const { close, url } = await start({ port: 0, store });
+    try {
+      const { data: groupData } = await post('/api/groups', {
+        name: 'Trip',
+        members: ['Alice', 'Bob'],
+      }, url);
+      const groupId = groupData.group.id;
+
+      const { status, data } = await postRaw(`/api/groups/${groupId}/expenses`, raw, url);
+      assert.strictEqual(status, 400);
+      assert.strictEqual(data.error.code, 'INVALID_JSON');
+      assert.strictEqual(store.load()[groupId].expenses.length, 0);
+    } finally {
+      close();
+    }
+  });
+}
+
+// AC-7: the oversized-body path called req.destroy(), which tore the socket down
+// before the 400 could be written — the client got a connection close, so `fetch`
+// rejected and there was no status to read at all.
+const OVERSIZED_BODY = JSON.stringify({
+  name: 'x'.repeat(70 * 1024),
+  members: ['Alice'],
+});
+
+test('the oversized fixture is genuinely over the 64KB limit', () => {
+  assert.ok(OVERSIZED_BODY.length > 64 * 1024);
+});
+
+test('POST /api/groups with an oversized body returns 400 INVALID_JSON, not a connection close', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const { status, data } = await postRaw('/api/groups', OVERSIZED_BODY, url);
+    assert.strictEqual(status, 400);
+    assert.strictEqual(data.error.code, 'INVALID_JSON');
+    assert.deepStrictEqual(store.load(), {});
+  } finally {
+    close();
+  }
+});
+
+test('POST /api/groups/:id/expenses with an oversized body returns 400 INVALID_JSON', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const { data: groupData } = await post('/api/groups', {
+      name: 'Trip',
+      members: ['Alice'],
+    }, url);
+    const groupId = groupData.group.id;
+
+    const { status, data } = await postRaw(`/api/groups/${groupId}/expenses`, OVERSIZED_BODY, url);
+    assert.strictEqual(status, 400);
+    assert.strictEqual(data.error.code, 'INVALID_JSON');
+    assert.strictEqual(store.load()[groupId].expenses.length, 0);
+  } finally {
+    close();
+  }
+});
+
+test('the server still accepts a normal body after rejecting an oversized one', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    await postRaw('/api/groups', OVERSIZED_BODY, url);
+    const { status } = await post('/api/groups', { name: 'After', members: ['Alice'] }, url);
+    assert.strictEqual(status, 201);
+  } finally {
+    close();
+  }
+});
