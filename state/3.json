@@ -62,5 +62,7 @@
       "agent": "planner",
       "action": "lock acquired"
     }
-  ]
+  ],
+  "resume_at": "implement",
+  "stopped_at": "plan"
 }
