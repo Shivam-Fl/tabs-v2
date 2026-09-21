@@ -71,6 +71,15 @@ jobs:
           fi
           node .sdlc/bin/ensure-deps.mjs
 
+      # Before anything reads this diff. A review of `base...head` against a base that has
+      # moved sees every change the base gained, as deletions attributed to this branch.
+      - name: Bring the branch up to date with its base
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ inputs.pr || github.event.pull_request.number }}
+        run: node .sdlc/bin/sync-branch.mjs
+
       - name: Resolve the PR and issue behind this deployment
         id: ctx
         env:
