@@ -159,6 +159,13 @@ jobs:
             Review PR #${{ steps.ctx.outputs.pr }} against its work order.
             CI is already green — do not re-check compilation, lint or tests.
 
+            Read the diff with `gh pr diff ${{ steps.ctx.outputs.pr }}`, which is computed from
+            the merge base. NOT `git diff main..HEAD`: two dots compare the tips, so anything
+            the base gained since this branch was cut shows up as a reversion on the branch,
+            and nothing in that output tells you the branch never touched those files. A review
+            once blocked a twelve-file feature PR over ~900 lines of pipeline changes it had
+            not made, for exactly that reason.
+
             Your highest-value job: does this fix the ROOT CAUSE, or only the one call site
             the ticket named? Grep every caller of every changed function yourself.
 
@@ -166,8 +173,15 @@ jobs:
             fenced json block — exactly this shape, nothing else in it:
 
             ```json
-            {"verdict": "approve"}
+            {"verdict": "approve", "unresolved": [{"title": "...", "detail": "..."}]}
             ```
+
+            `unresolved` is every finding you are NOT holding the merge for and NOT expecting
+            to see fixed in this PR. They become one follow-up ticket, so they still exist
+            after this branch merges. Leave it out only when there are none — a finding
+            recorded in prose that nobody actions is a finding that was not made, and an
+            approval once named an XSS hole, a wrong bind address and a lost-update race, all
+            three of which would have ceased to exist the moment the PR merged.
 
             When you REQUEST CHANGES, name what the blocking findings are about:
 

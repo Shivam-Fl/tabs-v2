@@ -82,12 +82,15 @@ const body = [
     '_No agent here can change `.sdlc/**` or `.github/**`. That is deliberate: an agent that ' +
     'rewrites its own rules to make its own failure go away leaves nothing behind to audit. ' +
     'This is a diagnosis for a person to act on._',
-  ].join('\n') : '',
-  override ? `\n_Overridden to \`escalate\`: ${override}._` : '',
+  ].join('\n') : null,
+  override ? `\n_Overridden to \`escalate\`: ${override}._` : null,
   '',
   `_Diagnosed by an agent that read the whole log of [the run that failed](${
     process.env.FAILED_URL ?? `../../actions/runs/${failedRun}`}) — [triage run](${runUrl})._`,
-].filter(Boolean).join('\n');
+  // Drop absent sections, keep the blank lines. `.filter(Boolean)` removed both, so the
+  // heading, the diagnosis, the evidence and the confidence rendered as one run-on paragraph —
+  // markdown needs a blank line between block elements.
+].filter((l) => l !== null).join('\n');
 
 await gh(['issue', 'comment', String(issue), '--body', body])
   .catch((e) => process.stdout.write(`::warning::could not post the diagnosis: ${e.message}\n`));

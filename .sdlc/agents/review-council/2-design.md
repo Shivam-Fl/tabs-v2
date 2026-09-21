@@ -11,6 +11,11 @@ Two jobs. The second matters more.
 
 ## Job 1: design and fit
 
+0. **Read the right diff: `gh pr diff <n>`, never `git diff main..HEAD`.** Two dots compare
+   the tips, so whatever the base gained since this branch was cut appears as a reversion on
+   the branch. You are the member who judges scope, which makes you the one that mistake ruins:
+   a review once blocked a twelve-file feature PR over ~900 lines of pipeline changes it had
+   not made, because a framework update had landed on the base while the PR was open.
 1. **Scope.** Anything in the diff not in the work order's `files[]` — a sneaky refactor, an
    unrequested improvement, a drive-by rename. Flag it regardless of whether it is an
    improvement; an unreviewed change is unreviewed.

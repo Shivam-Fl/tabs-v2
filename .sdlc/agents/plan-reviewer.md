@@ -57,6 +57,20 @@ planner to write down something the implementer is required to do anyway.
 - An **acceptance criterion is not observable in a browser**. QA verifies against a live URL,
   and an untestable criterion is one nobody will ever check. This is the one "missing detail"
   that really does block, because it is the only one no later stage can supply.
+- A **criterion that contradicts itself**, most often by stating a rule and then giving a
+  worked example the rule does not produce. Check the arithmetic in every example; this is the
+  cheapest blocking finding available to you and one of the most expensive to miss.
+
+  One criterion said "10000 paise across 3 members yields 3400/3300/3300" and, in the same
+  sentence, "remainder distributed one paise at a time in deterministic member order" — which
+  yields 3334/3333/3333. Both sum correctly; they are different conventions. The implementer
+  followed the algorithm and said so, the diff review agreed, and QA then failed the ticket
+  against the example.
+
+  Nothing downstream can fix that. The implementer cannot edit an acceptance criterion, and QA
+  is deliberately given no memory of its previous runs — so it re-reads the wrong half and
+  fails it again on every attempt until the budget runs out. A criterion is the one artefact in
+  a work order that outlives every stage, which is why an inconsistent one has to stop here.
 - **Two instructions that contradict each other**, where following either produces something
   the other forbids. The implementer cannot resolve this without guessing which one the
   planner meant.

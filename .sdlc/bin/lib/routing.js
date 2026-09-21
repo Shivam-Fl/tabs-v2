@@ -185,14 +185,76 @@ export function reviewVerdict({ declared = null, reviews = [] } = {}) {
  * @param {{body?: string}[]} reviews
  * @returns {{title: string, detail: string}[]}
  */
+// Section headings that are structure, not a finding.
+const NOT_A_FINDING = /^(review(\s+summary)?|findings?|verdict|blocking|what(\s|')?s?\s+(good|right|looks right)|recommendation|summary|root[-\s]cause)\b/i;
+// A reviewer's own words for "I am not holding the merge for this".
+const NON_BLOCKING = /\b(not[-\s]?blocking|non[-\s]?blocking|nits?|minor|optional|suggestions?)\b/i;
+
+/**
+ * The findings a review left behind, read from its PROSE.
+ *
+ * The structured `unresolved` field is what this should come from, and when the reviewer fills
+ * it in that is what gets used. But the field was documented in the schema and not in the
+ * prompt, so for a long time no reviewer filled it — and a review that approved a PR while
+ * naming an XSS hole, a wrong bind address and a lost-update race recorded `filed_findings=0`.
+ * All three would have ceased to exist the moment the PR merged.
+ *
+ * So the prose is the fallback, and it tolerates the shapes reviewers actually write rather
+ * than one canonical layout: `**2. XSS in UI rendering (not blocking)**` under a `### Findings`
+ * heading, or items under a `### Non-blocking` heading, or `- **nit:** ...`.
+ */
+export function unresolvedFromProse(body = '') {
+  const text = String(body).replace(/```json[\s\S]*?```/g, '');
+  const lines = text.split('\n');
+
+  const out = [];
+  let section = '';
+  let current = null;
+  const flush = () => {
+    if (!current) return;
+    const detail = current.detail.join('\n').trim();
+    // Inline marker on the item, or the section it sits under said so.
+    if (NON_BLOCKING.test(current.title) || NON_BLOCKING.test(section)) {
+      out.push({ title: current.title.replace(/\s*\(.*?not[-\s]?blocking.*?\)/i, '').trim(), detail });
+    }
+    current = null;
+  };
+
+  for (const line of lines) {
+    const heading = line.match(/^#{2,6}\s*(.+?)\s*$/);
+    if (heading) {
+      flush();
+      const title = heading[1].replace(/[*`]/g, '').trim();
+      // A non-blocking SECTION heading opens a section; anything else either is one finding's
+      // own heading or is structure.
+      if (NON_BLOCKING.test(title) || NOT_A_FINDING.test(title)) { section = title; continue; }
+      section = section && NON_BLOCKING.test(section) ? section : '';
+      current = { title, detail: [] };
+      continue;
+    }
+    // `**3. Node version drift (not blocking)**` — the shape reviewers reach for most.
+    const numbered = line.match(/^\*\*(?:\d+[.)]\s*)?(.+?)\*\*\s*$/);
+    if (numbered && !NOT_A_FINDING.test(numbered[1])) {
+      flush();
+      current = { title: numbered[1].trim(), detail: [] };
+      continue;
+    }
+    if (current) current.detail.push(line);
+  }
+  flush();
+  return out.filter((f) => f.title);
+}
+
 export function unresolvedFindings(reviews = []) {
   const latest = [...reviews].filter(Boolean).pop();
-  const block = String(latest?.body ?? '').match(/```json\s*\n([\s\S]*?)\n```/);
-  if (!block) return [];
+  const body = String(latest?.body ?? '');
+  const block = body.match(/```json\s*\n([\s\S]*?)\n```/);
 
   let raw;
-  try { raw = JSON.parse(block[1])?.unresolved; } catch { return []; }
-  if (!Array.isArray(raw)) return [];
+  try { raw = JSON.parse(block?.[1] ?? '{}')?.unresolved; } catch { raw = null; }
+  // The reviewer said nothing structured, so read what it wrote. A finding recorded in prose
+  // that nobody actions is a finding that was not made.
+  if (!Array.isArray(raw)) raw = unresolvedFromProse(body);
 
   // Repair the cosmetic, refuse the false: an over-long title is trimmed, an entry with no
   // title at all is dropped. A ticket called "undefined" is worse than no ticket, because
@@ -250,13 +312,34 @@ export function rejectionCriteria(reviews = []) {
  * @param {string[]} current
  * @returns {{criterion: string, rounds: number} | null}
  */
-export function repeatedCriterion(history = [], current = []) {
+export function repeatedCriterion(history = [], current = [], head = null) {
+  // A round only counts if the implementer ANSWERED it.
+  //
+  // Two rejections of the same criterion mean the fix did not work — but only if there was a
+  // fix. When the rework run dies before producing anything, or is dispatched without being
+  // told it is a rework and rebuilds instead of answering, the next review rejects the same
+  // criterion against a head nobody changed. Counting that as a second round escalates a
+  // criterion that has been attempted once.
+  //
+  // The head SHA is what distinguishes them: same head, same code, so it is the same round
+  // being re-judged rather than a second attempt that also failed. Entries are objects now;
+  // a bare array is an older entry from before this was recorded, and is trusted as a round
+  // because there is nothing better to do with it.
+  const criteriaOf = (e) => (Array.isArray(e) ? e : e?.criteria);
+  const headOf = (e) => (Array.isArray(e) ? null : e?.head);
+
   let worst = null;
   for (const c of current) {
     let rounds = 1;                                  // this rejection
+    let seenAt = head;
     for (let i = history.length - 1; i >= 0; i--) {  // then walk back while it keeps appearing
-      if (!Array.isArray(history[i]) || !history[i].includes(c)) break;
+      const listed = criteriaOf(history[i]);
+      if (!Array.isArray(listed) || !listed.includes(c)) break;
+      const at = headOf(history[i]);
+      // Same commit as the round we last counted: nothing was built in between.
+      if (at && seenAt && at === seenAt) continue;
       rounds++;
+      if (at) seenAt = at;
     }
     if (!worst || rounds > worst.rounds) worst = { criterion: c, rounds };
   }

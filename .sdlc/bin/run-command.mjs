@@ -130,10 +130,28 @@ switch (cmd) {
     // into the cap it just hit. Target state comes from the argument so the same command
     // works whether the issue died at planning or at implementation.
     const to = process.env.ARGS?.trim() || 'implementing';
+    const { ledger: before } = await routeOf(repoOf(), issue).catch(() => ({ ledger: null }));
     await ctl('reset', '--issue', issue, '--to', to);
     const workflow = to === 'planning' ? 'sdlc-plan.yml' : 'sdlc-implement.yml';
     await advance(issue, to, { agent: 'human' });
-    await gh(['workflow', 'run', workflow, '-f', `issue=${issue}`]);
+
+    // A retry into `implementing` on an issue that already has a branch is a REWORK, and
+    // saying so is what tells the implementer it is answering something rather than building.
+    //
+    // Without it the retry dispatched a bare `issue=`, `$REWORK` arrived empty, and the
+    // implementer read that as a fresh implementation — so it rebuilt instead of addressing
+    // the review that had sent it back. The reviewer then found the same criterion still
+    // broken, and the per-criterion streak counted a second failed round for something nobody
+    // had attempted twice, one step from escalating to a person.
+    //
+    // Read BEFORE the reset, because the reset is what clears the state this reads.
+    const args = ['-f', `issue=${issue}`];
+    if (workflow === 'sdlc-implement.yml' && before?.pr) {
+      const reason = { review: 'review', qa: 'fix:qa-failed' }[before.state] ?? 'fix:retry';
+      args.push('-f', `rework=${reason}`);
+      process.stdout.write(`issue #${issue}: retrying as a rework (${reason}), PR #${before.pr} exists\n`);
+    }
+    await gh(['workflow', 'run', workflow, ...args]);
     await gh(['issue', 'comment', issue, '--body',
       `Attempt counters cleared and restarted at **${to}**. The budget is full again — ` +
       'if it stops here a second time, the cause is worth reading before retrying.']);
