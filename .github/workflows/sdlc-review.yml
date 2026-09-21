@@ -9,6 +9,19 @@ on:
     inputs:
       pr: { required: true, type: string }
 
+# One review per PR at a time. This had no concurrency block at all, and two reviews ran on the
+# same PR concurrently: one dispatched by the gate when CI re-ran, one dispatched by hand. Both
+# paid for a model run, both posted findings, and both routed the PR — so whichever finished
+# last decided what happened next, over the top of the other's decision.
+#
+# `cancel-in-progress` rather than queueing: a second review means the diff has changed, and a
+# verdict on the old diff is worth less than the cost of producing it twice. A cancelled job
+# skips its cleanup, including the lock release — that is what the watchdog's dead-holder check
+# is for, and it is the cheaper of the two hazards.
+concurrency:
+  group: review-${{ inputs.pr }}
+  cancel-in-progress: true
+
 permissions:
   # `statusCheckRollup` is a GraphQL field over check runs AND legacy commit statuses, and it
   # needs a grant for each. Without both, `gh pr view --json statusCheckRollup` fails with
@@ -49,6 +62,15 @@ jobs:
           elif [ -f package.json ]; then npm install --no-audit --no-fund
           fi
           node .sdlc/bin/ensure-deps.mjs
+
+      # Before anything reads this diff. A review of `base...head` against a base that has
+      # moved sees every change the base gained, as deletions attributed to this branch.
+      - name: Bring the branch up to date with its base
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ inputs.pr || github.event.pull_request.number }}
+        run: node .sdlc/bin/sync-branch.mjs
 
       - name: Resolve the PR and its issue
         id: ctx
