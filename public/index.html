@@ -169,17 +169,31 @@ async function loadGroup(groupId) {
     const payer = data.group.members.find((m) => m.id === exp.payerId);
     const payerName = payer ? payer.name : exp.payerId;
 
-    let sharesHtml = exp.shares.map((s) => {
-      const member = data.group.members.find((m) => m.id === s.memberId);
-      const name = member ? member.name : s.memberId;
-      return `<span>${name}: ${formatRupees(s.paise)}</span>`;
-    }).join('');
+    // Description, payer name and member names are stored verbatim by the server,
+    // so they are attacker-controlled text by the time they get here. Assigning them
+    // through innerHTML would run a stored "<img src=x onerror=...>" in the browser of
+    // whoever opens this group; textContent renders it as the literal text it is.
+    const header = document.createElement('div');
+    header.className = 'expense-header';
+    header.textContent = `${exp.description} — ${formatRupees(exp.amountPaise)}`;
 
-    div.innerHTML = `
-      <div class="expense-header">${exp.description} — ${formatRupees(exp.amountPaise)}</div>
-      <div class="expense-payer">Paid by ${payerName}</div>
-      <div class="expense-shares">${sharesHtml}</div>
-    `;
+    const payerDiv = document.createElement('div');
+    payerDiv.className = 'expense-payer';
+    payerDiv.textContent = `Paid by ${payerName}`;
+
+    const sharesDiv = document.createElement('div');
+    sharesDiv.className = 'expense-shares';
+    for (const share of exp.shares) {
+      const member = data.group.members.find((m) => m.id === share.memberId);
+      const name = member ? member.name : share.memberId;
+      const span = document.createElement('span');
+      span.textContent = `${name}: ${formatRupees(share.paise)}`;
+      sharesDiv.appendChild(span);
+    }
+
+    div.appendChild(header);
+    div.appendChild(payerDiv);
+    div.appendChild(sharesDiv);
     listDiv.appendChild(div);
   }
 }
