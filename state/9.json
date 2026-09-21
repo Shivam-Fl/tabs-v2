@@ -72,5 +72,7 @@
     "matched_rule": "no deterministic rule matched — review follow-ups requiring code changes",
     "gates": {},
     "decided_at": "2026-09-21T20:03:14.518Z"
-  }
+  },
+  "resume_at": "plan",
+  "stopped_at": "plan"
 }
