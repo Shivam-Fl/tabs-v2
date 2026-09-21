@@ -112,7 +112,24 @@ export async function writeLedger(repo, issue, ledger, sha, message) {
  * Read, mutate, write — retrying on a lost race. `mutate` must be pure and safe to re-run,
  * because it will be called again with fresh state if someone else wrote in between.
  */
-export async function updateLedger(repo, issue, mutate, { attempts = 4 } = {}) {
+/**
+ * @param {{attempts?: number}} opts
+ *
+ * Eight attempts with JITTERED backoff, not four with fixed.
+ *
+ * Every issue writes its own `state/<n>.json`, so the contention is not over the file — it is
+ * the branch head, which every write commits to. That is invisible until something makes the
+ * writes simultaneous, and a fan-out does exactly that by construction: one maintainer split
+ * created four issues, four intakes started within a second, and one of them exhausted four
+ * retries in about three seconds and failed with
+ * "is at 89053c80 but expected 4cd98611 (HTTP 409)".
+ *
+ * Fixed backoff is the deeper half of that bug. Four writers that collide once retry after
+ * the same 200ms, collide again, wait the same 400ms, and stay in lockstep all the way to the
+ * cap — the delays grow but the collisions never thin out. Jitter is what decorrelates them,
+ * and it matters more here than the extra attempts do.
+ */
+export async function updateLedger(repo, issue, mutate, { attempts = 8 } = {}) {
   let lastError;
   for (let i = 0; i < attempts; i++) {
     const { ledger, sha } = await readLedger(repo, issue);
@@ -124,7 +141,9 @@ export async function updateLedger(repo, issue, mutate, { attempts = 4 } = {}) {
     } catch (e) {
       lastError = e;
       if (!/409|conflict|does not match/i.test(String(e.stderr ?? e.message))) throw e;
-      await new Promise((r) => setTimeout(r, 200 * 2 ** i)); // someone else won; re-read
+      // Full jitter: a random point in the whole window rather than the window's edge.
+      const ceiling = Math.min(200 * 2 ** i, 8000);
+      await new Promise((r) => setTimeout(r, Math.random() * ceiling));
     }
   }
   throw new Error(`ledger write for issue #${issue} lost ${attempts} races: ${lastError?.message}`);

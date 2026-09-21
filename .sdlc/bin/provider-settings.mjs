@@ -21,7 +21,11 @@ const cfg = await loadConfig();
 const p = cfg.runtime?.provider ?? {};
 
 const env = {};
-if (p.base_url) env.ANTHROPIC_BASE_URL = p.base_url;
+// The client appends `/v1/messages` itself, so a base URL that already ends in /v1 becomes
+// `.../v1/v1/messages` — a 404 that Claude Code reports as
+// "model_not_found: It may not exist or you may not have access to it", which reads as a
+// missing model and sends you looking at the catalog instead of the path.
+if (p.base_url) env.ANTHROPIC_BASE_URL = String(p.base_url).replace(/\/+$/, '').replace(/\/v1$/, '');
 
 // A stable id per conversation, which for this pipeline is one workflow run. Providers use
 // it for routing and prompt caching; one shared constant would pool every issue's context.
