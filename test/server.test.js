@@ -615,3 +615,147 @@ test('the server still accepts a normal body after rejecting an oversized one', 
     close();
   }
 });
+
+// The seeded fixture, over HTTP: Hotel ₹9,000 paid by Asha and Dinner ₹4,500 paid by
+// Rahul, both split equally three ways.
+async function seedTripExpenses(groupId, url) {
+  await post(`/api/groups/${groupId}/expenses`, {
+    description: 'Hotel',
+    amountPaise: 900000,
+    payerId: 'Asha',
+    splitMemberIds: tripMembers(),
+  }, url);
+  await post(`/api/groups/${groupId}/expenses`, {
+    description: 'Dinner',
+    amountPaise: 450000,
+    payerId: 'Rahul',
+    splitMemberIds: tripMembers(),
+  }, url);
+}
+
+test('GET /api/groups/:id/balances on a group with no expenses returns zeroes in member order', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    const { status, data } = await get(`/api/groups/${groupId}/balances`, url);
+    assert.strictEqual(status, 200);
+    assert.deepStrictEqual(data.balances, [
+      { memberId: 'Asha', paise: 0 },
+      { memberId: 'Rahul', paise: 0 },
+      { memberId: 'Meera', paise: 0 },
+    ]);
+  } finally {
+    close();
+  }
+});
+
+// AC-1 end to end: the numbers the group screen renders come from this response.
+test('GET /api/groups/:id/balances after Hotel and Dinner returns +450000, 0, -450000', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    await seedTripExpenses(groupId, url);
+
+    const { status, data } = await get(`/api/groups/${groupId}/balances`, url);
+    assert.strictEqual(status, 200);
+    assert.deepStrictEqual(data.balances, [
+      { memberId: 'Asha', paise: 450000 },
+      { memberId: 'Rahul', paise: 0 },
+      { memberId: 'Meera', paise: -450000 },
+    ]);
+    assert.strictEqual(data.balances.reduce((sum, b) => sum + b.paise, 0), 0);
+  } finally {
+    close();
+  }
+});
+
+// AC-2 end to end: exactly one transfer, with no zero-amount line and nothing the other
+// way round.
+test('GET /api/groups/:id/settlement after Hotel and Dinner returns exactly Meera pays Asha', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    await seedTripExpenses(groupId, url);
+
+    const { status, data } = await get(`/api/groups/${groupId}/settlement`, url);
+    assert.strictEqual(status, 200);
+    assert.deepStrictEqual(data.settlement, [
+      { from: 'Meera', to: 'Asha', amountPaise: 450000 },
+    ]);
+  } finally {
+    close();
+  }
+});
+
+// AC-4: a group with nothing in it is an empty settlement, not an error.
+test('GET /api/groups/:id/settlement on a group with no expenses returns an empty list', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    const { status, data } = await get(`/api/groups/${groupId}/settlement`, url);
+    assert.strictEqual(status, 200);
+    assert.deepStrictEqual(data.settlement, []);
+  } finally {
+    close();
+  }
+});
+
+test('the derived endpoints return 404 GROUP_NOT_FOUND for an unknown group', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    for (const resource of ['balances', 'settlement']) {
+      const { status, data } = await get(`/api/groups/nonexistent-id/${resource}`, url);
+      assert.strictEqual(status, 404, `/${resource} did not 404`);
+      assert.strictEqual(data.error.code, 'GROUP_NOT_FOUND');
+    }
+  } finally {
+    close();
+  }
+});
+
+test('the derived endpoints refuse a non-GET method with 405', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    for (const resource of ['balances', 'settlement']) {
+      const { status, data } = await post(`/api/groups/${groupId}/${resource}`, {}, url);
+      assert.strictEqual(status, 405, `POST /${resource} was not refused`);
+      assert.strictEqual(data.error.code, 'METHOD_NOT_ALLOWED');
+    }
+  } finally {
+    close();
+  }
+});
+
+// AC-5 over HTTP: the public API cannot write an unbalanced group, so the store is
+// corrupted the way a bad migration or a hand-edited JSON file would corrupt it — an
+// expense split against a member the group no longer lists. Both derived routes answer
+// with the same code, because it is the same invariant failing and the client should not
+// have to know which URL it read the bad data through.
+test('the derived endpoints return 500 BALANCES_INVARIANT when the stored group is corrupt', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    await seedTripExpenses(groupId, url);
+
+    const data = store.load();
+    data[groupId].expenses[0].splitMemberIds = [...tripMembers(), 'Ghost'];
+    store.save(data);
+
+    for (const resource of ['balances', 'settlement']) {
+      const { status, data: body } = await get(`/api/groups/${groupId}/${resource}`, url);
+      assert.strictEqual(status, 500, `/${resource} did not report the broken invariant`);
+      assert.strictEqual(body.error.code, 'BALANCES_INVARIANT');
+      assert.match(body.error.message, /net to zero/);
+    }
+  } finally {
+    close();
+  }
+});

@@ -36,6 +36,15 @@
   .hidden { display: none; }
   .back-link { color: #2563eb; cursor: pointer; font-size: 0.9rem; margin-bottom: 12px; display: inline-block; }
   .back-link:hover { text-decoration: underline; }
+  /* The balances and settlement panels are plain lists rather than the cards the expense
+     list uses: a balance is one line of text whose meaning is carried by the word in front
+     of it, and a settlement line is the only thing there is to look at. */
+  .panel-list { list-style: none; }
+  .panel-list li { margin-bottom: 6px; }
+  .balance-positive { color: #16a34a; }
+  .balance-negative { color: #dc2626; }
+  .balance-zero { color: #6b7280; }
+  .transfer { background: #fff; padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
 </style>
 </head>
 <body>
@@ -76,6 +85,15 @@
       <div id="expense-error" class="error"></div>
       <button type="submit">Add Expense</button>
     </form>
+    <div id="balances-panel">
+      <h2>Balances</h2>
+      <div id="balances-error" class="error"></div>
+      <ul id="balances-list" class="panel-list"></ul>
+    </div>
+    <div id="settlement-panel">
+      <h2>Settlement</h2>
+      <ul id="settlement-list" class="panel-list"></ul>
+    </div>
     <div id="expense-list"></div>
   </div>
 </div>
@@ -172,6 +190,78 @@ async function loadGroups() {
   }
 }
 
+function renderBalances(listEl, members, balances) {
+  listEl.innerHTML = '';
+  if (balances.length === 0) {
+    listEl.innerHTML = '<li class="empty-state">No balances yet.</li>';
+    return;
+  }
+  for (const entry of balances) {
+    const member = members.find((m) => m.id === entry.memberId);
+    // 'owed' is money coming back to this member, 'owes' is money they still have to
+    // send, 'even' is settled. The amount is rendered unsigned with the sign moved into
+    // the label and the colour, because that is how the balance is said out loud:
+    // "Meera owes ₹4,500.00", not "Meera is at minus ₹4,500.00".
+    let label = 'even';
+    let signClass = 'balance-zero';
+    if (entry.paise > 0) {
+      label = 'owed';
+      signClass = 'balance-positive';
+    } else if (entry.paise < 0) {
+      label = 'owes';
+      signClass = 'balance-negative';
+    }
+    const li = document.createElement('li');
+    li.className = signClass;
+    // The member name is attacker-controlled by the time it gets here, same as the
+    // expense list below, so it goes in as text rather than as markup.
+    li.textContent =
+      `${member ? member.name : entry.memberId}: ${label} ${formatRupees(Math.abs(entry.paise))}`;
+    listEl.appendChild(li);
+  }
+}
+
+function renderSettlement(listEl, members, settlement) {
+  listEl.innerHTML = '';
+  if (settlement.length === 0) {
+    listEl.innerHTML = '<li class="empty-state">No settlements yet.</li>';
+    return;
+  }
+  for (const transfer of settlement) {
+    const from = members.find((m) => m.id === transfer.from);
+    const to = members.find((m) => m.id === transfer.to);
+    const li = document.createElement('li');
+    li.className = 'transfer';
+    li.textContent =
+      `${from ? from.name : transfer.from} pays ${to ? to.name : transfer.to} ${formatRupees(transfer.amountPaise)}`;
+    listEl.appendChild(li);
+  }
+}
+
+// Both panels come from the same expenses the caller just loaded, so they are fetched
+// together rather than one after the other.
+async function loadBalancesAndSettlement(groupId, members) {
+  const balancesList = document.getElementById('balances-list');
+  const settlementList = document.getElementById('settlement-list');
+  const errorDiv = document.getElementById('balances-error');
+  errorDiv.textContent = '';
+  try {
+    const [balanceData, settlementData] = await Promise.all([
+      api(`/api/groups/${groupId}/balances`),
+      api(`/api/groups/${groupId}/settlement`),
+    ]);
+    renderBalances(balancesList, members, balanceData.balances);
+    renderSettlement(settlementList, members, settlementData.settlement);
+  } catch (err) {
+    // One error line above the panels instead of failing the whole view. A group whose
+    // stored expenses no longer add up is exactly when the user needs to see the expense
+    // list it was derived from, and the form above it still works.
+    balancesList.innerHTML = '';
+    settlementList.innerHTML = '';
+    errorDiv.textContent = err.message;
+  }
+}
+
 async function loadGroup(groupId) {
   const data = await api(`/api/groups/${groupId}/expenses`);
   document.getElementById('group-title').textContent = data.group.name;
@@ -218,6 +308,11 @@ async function loadGroup(groupId) {
   // The boxes were rebuilt, so their visibility has to be re-derived rather than
   // inherited from the labels that were just thrown away.
   syncShareInputs();
+
+  // Deliberately above the expense list, and above the early return that list takes for
+  // an empty group: a group with no expenses has no balances and no transfers, but it
+  // still has both panels, showing their empty states rather than nothing at all.
+  await loadBalancesAndSettlement(groupId, data.group.members);
 
   // Render expenses
   const listDiv = document.getElementById('expense-list');
