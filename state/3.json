@@ -36,7 +36,16 @@
   "planned_route": [],
   "on_complete": null,
   "artifacts": {},
-  "failure_history": [],
+  "failure_history": [
+    {
+      "stage": "implement",
+      "error_signature": "6a9b3e6752f31ef7",
+      "error_type": "unknown",
+      "attempt": 1,
+      "at": "2026-09-21T18:06:11.553Z",
+      "digest": "The implement stage failed and no known error pattern matched. The raw output is below."
+    }
+  ],
   "review_history": [
     [
       "ac-1",
