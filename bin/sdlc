@@ -157,10 +157,25 @@ async function doctor() {
   section('Secrets and variables');
   try {
     const secrets = JSON.parse(await gh(['api', `repos/${repo}/actions/secrets`])).secrets.map((s) => s.name);
-    secrets.includes('CLAUDE_CODE_OAUTH_TOKEN')
-      ? pass('CLAUDE_CODE_OAUTH_TOKEN')
-      : fail('CLAUDE_CODE_OAUTH_TOKEN is not set — every agent workflow will fail',
-             'run `claude setup-token`, then: gh secret set CLAUDE_CODE_OAUTH_TOKEN');
+    // Either credential is enough, and which one depends on where the models come from.
+    // A repo pointed at a gateway authenticates with an API key and has no OAuth token at
+    // all — demanding one there is a check that fails a correctly configured repo.
+    const viaProvider = Boolean(cfg?.runtime?.provider?.base_url);
+    const oauth = secrets.includes('CLAUDE_CODE_OAUTH_TOKEN');
+    const apiKey = secrets.includes('ANTHROPIC_API_KEY');
+    if (oauth || apiKey) {
+      pass(oauth && apiKey ? 'CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY'
+        : oauth ? 'CLAUDE_CODE_OAUTH_TOKEN' : 'ANTHROPIC_API_KEY',
+        viaProvider ? `models come from ${cfg.runtime.provider.base_url}` : 'Anthropic direct');
+      if (viaProvider && !apiKey) {
+        warn('a provider is configured but ANTHROPIC_API_KEY is not set',
+             'a gateway that wants `x-api-key` will refuse an OAuth bearer token');
+      }
+    } else {
+      fail('no model credential — every agent workflow will fail',
+           'run `claude setup-token` then `gh secret set CLAUDE_CODE_OAUTH_TOKEN`, or set ' +
+           'ANTHROPIC_API_KEY for the provider in runtime.provider.base_url');
+    }
   } catch { warn('could not read repository secrets', 'needs admin access to this repo'); }
 
   try {
