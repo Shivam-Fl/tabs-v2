@@ -51,6 +51,57 @@ test('GET /api/groups lists created groups', async () => {
   }
 });
 
+// AC-2: the client busy flag only covers one tab. Two tabs, a direct API call or a
+// replayed request all reach the server, and `group.name` had no uniqueness constraint,
+// so every one of them persisted another group with the same name.
+test('POST /api/groups rejects a name that already exists, ignoring case and spacing', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const created = await post('/api/groups', {
+      name: 'Goa Trip',
+      members: ['Alice', 'Bob'],
+    }, url);
+    assert.strictEqual(created.status, 201);
+
+    // Each of these is the same group name to a user, and the exact-match case is what a
+    // triple submit sends; the other two are what a second tab or a scripted client sends.
+    for (const name of ['Goa Trip', 'goa trip', '  Goa Trip  ']) {
+      const { status, data } = await post('/api/groups', { name, members: ['Alice'] }, url);
+      assert.strictEqual(status, 400, `"${name}" was accepted as a new group`);
+      assert.strictEqual(data.error.code, 'GROUP_NAME_TAKEN');
+      assert.strictEqual(data.error.message, 'A group with this name already exists');
+    }
+
+    const { data } = await get('/api/groups', url);
+    assert.strictEqual(data.groups.length, 1, 'a rejected duplicate was written to the store');
+    assert.strictEqual(store.load()[created.data.group.id].members.length, 2);
+  } finally {
+    close();
+  }
+});
+
+test('POST /api/groups accepts a name that is merely similar to an existing one', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    await post('/api/groups', { name: 'Goa Trip', members: ['Alice'] }, url);
+
+    // The check is equality after normalizing, not a prefix or substring match: a name
+    // the user would read as a different group has to stay creatable.
+    for (const name of ['Goa Trip 2', 'Goa', 'Trip']) {
+      const { status, data } = await post('/api/groups', { name, members: ['Alice'] }, url);
+      assert.strictEqual(status, 201, `"${name}" was wrongly rejected`);
+      assert.strictEqual(data.group.name, name);
+    }
+
+    const { data } = await get('/api/groups', url);
+    assert.strictEqual(data.groups.length, 4);
+  } finally {
+    close();
+  }
+});
+
 test('POST /api/groups/:id/expenses returns 201 with the new expense', async () => {
   const store = createStore({ memory: true });
   const { close, url } = await start({ port: 0, store });

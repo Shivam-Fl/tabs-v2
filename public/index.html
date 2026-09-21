@@ -106,6 +106,11 @@ let currentGroupId = null;
 // The form is cleared only once the POST resolves, so a second submit while the first
 // is in flight posts a second expense. The handler holds this until it is done.
 let expenseSubmitting = false;
+// Same hole, same guard: the create-group form also clears its fields only after the
+// POST resolves, so a second submit in that window posted a second group. The server
+// refuses a duplicate name now, but a user who clicked once should not have to read an
+// error about a group they never asked for twice.
+let groupSubmitting = false;
 
 function showCreateView() {
   document.getElementById('view-create-group').classList.remove('hidden');
@@ -208,25 +213,32 @@ async function loadGroup(groupId) {
 // Create group form
 document.getElementById('create-group-form').addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (groupSubmitting) return;
+  groupSubmitting = true;
   const errorDiv = document.getElementById('create-group-error');
   errorDiv.textContent = '';
 
-  const name = document.getElementById('group-name').value.trim();
-  const membersRaw = document.getElementById('group-members').value;
-  const members = membersRaw.split(',').map((s) => s.trim()).filter(Boolean);
-
-  if (members.length === 0) {
-    errorDiv.textContent = 'Please enter at least one member.';
-    return;
-  }
-
+  // The flag is set above but only cleared in the finally, and the validation return
+  // below sits inside the try on purpose: clearing it around the fetch alone would wedge
+  // the form shut the first time a submit carried no members.
   try {
+    const name = document.getElementById('group-name').value.trim();
+    const membersRaw = document.getElementById('group-members').value;
+    const members = membersRaw.split(',').map((s) => s.trim()).filter(Boolean);
+
+    if (members.length === 0) {
+      errorDiv.textContent = 'Please enter at least one member.';
+      return;
+    }
+
     const data = await api('/api/groups', 'POST', { name, members });
     document.getElementById('group-name').value = '';
     document.getElementById('group-members').value = '';
     showGroupView(data.group.id);
   } catch (err) {
     errorDiv.textContent = err.message;
+  } finally {
+    groupSubmitting = false;
   }
 });
 
