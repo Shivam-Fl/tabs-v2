@@ -16,7 +16,11 @@
     "cap_minutes": 120
   },
   "touch_paths": [
+    "src/server.js",
+    "src/domain.js",
     "public/index.html",
+    "test/server.test.js",
+    "test/domain.test.js",
     "test/xss.test.js"
   ],
   "acceptance": [],
