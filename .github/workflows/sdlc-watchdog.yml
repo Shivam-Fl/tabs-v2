@@ -60,6 +60,14 @@ jobs:
       #
       # No CLOSED_ISSUE: top-up only. It wakes nothing when the cap is full, and nothing when
       # no issue is ready — so on a healthy repo this step is a no-op every fifteen minutes.
+      # Issues parked waiting out a provider outage. This is the only thing in the framework
+      # that runs on a clock, so it is the only thing that can start work again after a wait
+      # that nothing else would notice — a quota limit clears silently, on its own schedule.
+      - name: Start anything whose cooldown has passed
+        if: always()
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: node .sdlc/bin/resume-cooled-down.mjs
+
       - name: Start whatever is ready and has a slot
         if: always()
         env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }

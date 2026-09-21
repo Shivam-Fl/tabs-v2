@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { gh, setOutput, loadConfig, repo as repoOf } from './lib/actions.js';
 import { advance } from './lib/advance.js';
 import { handOffNext, routeOf, markResume } from './lib/route-io.js';
+import { updateLedger } from './lib/state-io.js';
 import { replaceSection, acceptanceChecklist } from './lib/pr-body.js';
 
 const exec = promisify(execFile);
@@ -48,6 +49,11 @@ const body = [
 ].filter(Boolean).join('\n');
 
 await gh(['issue', 'comment', issue, '--body', body]);
+
+// Posted, so the resume stash has done its job. Left in place it would make the next genuine
+// replan of this issue post the old plan instead of writing a new one.
+await updateLedger(repoOf(), Number(issue), (l) => { delete l.approved_work_order; })
+  .catch((e) => process.stdout.write(`::warning::could not clear the resume stash: ${e.message}\n`));
 
 // Did the planner ask for a detour? It has just read the code, which the Router had not, so
 // this is the first point in the pipeline where the route can be corrected on evidence. It

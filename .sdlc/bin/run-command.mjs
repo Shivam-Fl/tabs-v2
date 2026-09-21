@@ -20,6 +20,28 @@ switch (cmd) {
     await gh(['issue', 'edit', issue, '--remove-label', 'sdlc:plan-review']).catch(() => {});
     const { ledger } = await routeOf(repoOf(), issue);
 
+    // Approving something that is not waiting is not a no-op — it is a second dispatch.
+    //
+    // A plan reviewer approved a work order and started the implementer; `/sdlc approve`
+    // typed a moment later read `resume_at` and started a second one. Two implementers on
+    // one branch is the exact race the per-issue lock exists to prevent, and the lock only
+    // catches it after both jobs have already spun up a runner.
+    //
+    // A gate leaves the issue in a state that is plainly parked. Anything else is work in
+    // progress, and the honest answer is to say so rather than to add to it.
+    const RUNNING = ['triage', 'planning', 'implementing', 'review', 'qa', 'diagnosing'];
+    if (RUNNING.includes(ledger?.state) && !ledger?.resume_at) {
+      await gh(['issue', 'comment', issue, '--body',
+        `Nothing is waiting: this issue is at \`${ledger.state}\` and running.\n\n` +
+        'Approving here would start a second copy of that stage on the same branch, which is ' +
+        'the race the per-issue lock exists to stop — and the lock only catches it after both ' +
+        'runs have started. If it looks stuck, the watchdog reports a genuine stall; ' +
+        '`/sdlc stop` halts it.']).catch(() => {});
+      process.stdout.write(`issue #${issue}: already ${ledger.state} — nothing to approve\n`);
+      setOutput('action', 'none');
+      break;
+    }
+
     // The merge gate is the one where "continue the route" is the wrong reading: there is
     // nothing after QA to start, and the thing being approved is the merge itself. This used
     // to re-dispatch the implementer on code QA had just passed.

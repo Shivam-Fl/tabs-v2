@@ -321,6 +321,10 @@ await updateLedger(repo, issue, (l) => {
 const workOrder = await exec('node', ['.sdlc/bin/fetch-work-order.mjs'], { env: { ...process.env, ISSUE: String(issue) } })
   .then((r) => JSON.parse(r.stdout)).catch(() => null);
 
+// Is there an attempt left to act on a verdict? A diagnosis nothing can execute is a
+// diagnosis worth having on the issue but not worth a model run to produce.
+const budgetGone = (before?.attempts?.[route.counter] ?? 0) >= Number(cfg.limits?.attempts ?? 10);
+
 const decision = agentRuntimeFailed && !d.findings.length
   // The MODEL RUN failed, not the project's code. There is no diff to fix and no diagnosis
   // to revise — handing this to a fixer spends an attempt proving the runtime is still down.
@@ -335,12 +339,32 @@ const decision = agentRuntimeFailed && !d.findings.length
       reason: 'the agent runtime failed before it produced anything — no diff to fix and no ' +
               'diagnosis to revise. Usually a rate or quota limit on the token, not the code',
     }
-  : decide(history, signature, {
-      repeatEscalate: Number(cfg.limits?.repeat_failure_escalate ?? 2),
-      maxAttempts: Number(cfg.limits?.attempts ?? 10),
-      attempts: before?.attempts?.[route.counter] ?? 0,
-      canRootCause: Boolean(workOrder) && stage !== 'plan',
-    });
+  : budgetGone
+    // No attempt left to spend on any verdict, so there is nothing for an agent to decide.
+    ? {
+        action: 'escalate',
+        occurrences: consecutive(history, signature),
+        reason: `the ${route.counter} budget is spent — a diagnosis now has no attempt to act on`,
+      }
+    // Everything else goes to an AGENT, which is the whole point of this being a hand-off
+    // and not a decision.
+    //
+    // This script cannot see the log. It runs inside the failing run, where the log does not
+    // exist yet and the annotations API returns nothing — so its evidence was the name of the
+    // step that went red, and its rule for an unrecognised first failure was to re-run the
+    // stage. That re-ran a three-agent council, thirty-three minutes and three models, to
+    // repair one `gh` call that had failed AFTER the plan was approved. A regex table cannot
+    // tell a failed post from a crashed planner, and nothing else was looking.
+    //
+    // Dispatched afterwards, an agent reads the whole log, the code that threw, and what
+    // survived — and answers the question a pattern match cannot: does re-running this make
+    // the next attempt different?
+    : {
+        action: 'triage',
+        occurrences: consecutive(history, signature),
+        reason: 'an agent reads the failed run\'s full log and decides what happens next — ' +
+                'this script cannot see that log from inside the run that produced it',
+      };
 
 // --- the packet --------------------------------------------------------------
 const packet = {
@@ -379,6 +403,7 @@ writeFileSync('failure-packet.json', `${JSON.stringify(packet, null, 2)}\n`);
 // --- say it where someone is looking -----------------------------------------
 const heading = {
   fix: `## ${stage} failed — sending it back with the error attached`,
+  triage: `## ${stage} failed — an agent is reading the log`,
   'root-cause': `## ${stage} failed the same way twice — the diagnosis goes on trial`,
   escalate: `## ${stage} failed — stopping`,
 }[decision.action];
@@ -420,6 +445,44 @@ setOutput('signature', signature);
 setOutput('error_type', errorType);
 
 // --- route -------------------------------------------------------------------
+// A provider outage is a WAIT, not a stop.
+//
+// `agent-runtime` means the model run failed before producing anything, which is almost always
+// a rate or quota limit — the code was never wrong. Retrying at once proves the limit is still
+// there and burns an attempt; stopping for a person means that at 2am the pipeline is finished
+// for the night over something that clears itself in twenty minutes.
+//
+// So it parks with a time, and the watchdog starts it again when that time passes. Backing off
+// each round, because a limit that is still there after one cooldown will not have moved in
+// another twenty minutes.
+if (decision.action === 'escalate' && errorType === 'agent-runtime') {
+  const tries = Number(before?.runtime_retries ?? 0);
+  const maxRetries = Number(cfg.limits?.runtime_retries ?? 4);
+  if (tries < maxRetries) {
+    const minutes = Math.min(20 * 2 ** tries, 120);
+    const at = new Date(Date.now() + minutes * 60_000);
+    await updateLedger(repo, issue, (l) => {
+      l.retry_after = at.toISOString();
+      l.retry_stage = stage;
+      l.parked_at = new Date().toISOString();
+    }).catch(() => {});
+    await markResume(repo, issue, stage === 'ci' || stage === 'gate' ? 'implement' : stage, 'retry')
+      .catch(() => {});
+    // needs-human frees the in-flight slot, which is what lets everything else keep moving
+    // while this one waits. The watchdog is what brings it back.
+    await advance(issue, 'needs-human', { agent: 'self-heal' });
+    await gh(['issue', 'comment', String(issue), '--body',
+      `Parked for ${minutes} minutes: the agent runtime failed before it produced anything, ` +
+      'which is usually a rate or quota limit on the token rather than a problem with the ' +
+      `code.\n\nThe watchdog starts \`${stage}\` again after ${at.toISOString()} — ` +
+      `cooldown ${tries + 1} of ${maxRetries}. Nothing is lost; the slot is free for other ` +
+      'issues meanwhile. `/sdlc retry ' + stage + '` starts it sooner.']).catch(() => {});
+    process.stdout.write(`issue #${issue}: parked ${minutes}m waiting for the runtime\n`);
+    setOutput('action', 'cooldown');
+    process.exit(0);
+  }
+}
+
 if (decision.action === 'escalate') {
   // Which stage to re-run when a person unblocks this. A crash resumes by running the SAME
   // stage again — nothing after it can start, because the thing before it never finished.
@@ -433,6 +496,19 @@ if (decision.action === 'escalate') {
     'counters and starts again; `/sdlc approve` after changing something by hand does the same ' +
     'without clearing them.']).catch(() => {});
   process.stdout.write(`issue #${issue}: escalated — ${decision.reason}\n`);
+  process.exit(0);
+}
+
+// An agent decides what this failure means. Dispatched rather than decided here, because the
+// log that answers it only exists once this run has finished.
+if (decision.action === 'triage') {
+  await handOff('sdlc-triage.yml', [
+    '-f', `issue=${issue}`,
+    ...(pr ? ['-f', `pr=${pr}`] : []),
+    '-f', `stage=${stage}`,
+    '-f', `failed_run=${process.env.RUN_ID ?? ''}`,
+  ], { issue, pr, why: 'a stage failed and an agent has to read the log before anything acts' });
+  process.stdout.write(`issue #${issue}: ${stage} failed (${errorType}) -> triage\n`);
   process.exit(0);
 }
 

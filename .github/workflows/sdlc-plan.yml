@@ -327,6 +327,9 @@ jobs:
 
       - name: Who must look at this plan
         id: gate
+        # A resumed plan has already been through the gate and the reviewer. Running them
+        # again would re-review an approved plan and could reject what was already accepted.
+        if: steps.strategy.outputs.mode != 'resume'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node .sdlc/bin/plan-gate.mjs

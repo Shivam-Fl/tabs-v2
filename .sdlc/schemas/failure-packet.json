@@ -68,7 +68,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 12000,
-      "description": "The actual compiler/test/runner output. NOT a summary — the summary is what failed to be enough last time."
+      "description": "The actual compiler/test/runner output. NOT a summary \u2014 the summary is what failed to be enough last time."
     },
     "digest": {
       "type": "string",
@@ -81,7 +81,8 @@
       "enum": [
         "fix",
         "root-cause",
-        "escalate"
+        "escalate",
+        "triage"
       ]
     },
     "decision_reason": {

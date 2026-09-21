@@ -8,36 +8,13 @@
 // normal (a push and a comment can land in the same second) — the loser retries against
 // fresh state rather than clobbering it.
 
-import { spawn } from 'node:child_process';
+// One `gh` implementation for the whole pipeline. This module used to carry its own copy —
+// the one that already knew stdin exists — and the shared one kept passing documents through
+// argv until that hit E2BIG. Two copies means the next fix lands in one of them.
+import { gh } from './actions.js';
 
 export const STATE_BRANCH = 'sdlc-state';
 const pathFor = (issue) => `state/${issue}.json`;
-
-/**
- * Run `gh`, optionally writing `input` to its stdin.
- *
- * Uses spawn rather than promisify(execFile) deliberately: execFile has no `input` option
- * (that is execFileSync), so passing one is silently ignored and any command reading stdin
- * — `gh api --input -` — hangs forever instead of failing.
- */
-function gh(args, { input } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('gh', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code === 0) return resolve(stdout);
-      const err = new Error(`gh ${args[0]} failed (${code}): ${stderr.trim()}`);
-      err.stderr = stderr;
-      reject(err);
-    });
-    if (input !== undefined) child.stdin.end(input);
-    else child.stdin.end();
-  });
-}
 
 const BRANCH_README = `# sdlc-state
 

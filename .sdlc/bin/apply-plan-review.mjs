@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Acts on the plan reviewer's verdict.
 import { readFileSync, existsSync } from 'node:fs';
-import { gh, setOutput, loadConfig, die } from './lib/actions.js';
+import { gh, setOutput, loadConfig, die, repo as repoOf } from './lib/actions.js';
+import { updateLedger } from './lib/state-io.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const exec = promisify(execFile);
@@ -34,6 +35,21 @@ const rejectedPlan = (() => {
 await gh(['issue', 'edit', issue, '--remove-label', 'sdlc:plan-review']).catch(() => {});
 
 if (r.verdict === 'approve') {
+  // An approved plan must outlive the rest of this run.
+  //
+  // A council spent 33 minutes on a work order, this reviewer approved it, and then posting
+  // it threw — so the self-heal loop saw a failed plan stage, did the only thing it can do
+  // with one, and dispatched a fresh council. The plan was never the problem; it just lived
+  // nowhere but the runner's disk, and an approved plan that only exists there is an approved
+  // plan one `gh` call away from being paid for twice.
+  //
+  // Stashed on the ledger, cleared once it is posted. `plan-strategy` picks it up on the way
+  // in and skips straight to posting, so a failure after this point costs a retry, not a
+  // replan.
+  await updateLedger(repoOf(), Number(issue), (l) => {
+    l.approved_work_order = JSON.parse(readFileSync('work-order.json', 'utf8'));
+  }).catch((e) => process.stdout.write(`::warning::could not stash the approved plan: ${e.message}\n`));
+
   await gh(['issue', 'comment', issue, '--body',
     '## Plan review: approved\n\nThe plan reviewer verified the diagnosis and the caller analysis. ' +
     'Proceeding to implementation.' +

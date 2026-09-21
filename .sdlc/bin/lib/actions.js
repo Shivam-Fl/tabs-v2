@@ -1,16 +1,71 @@
 // Shared helpers for the workflow scripts: gh calls, step outputs, config loading.
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 import { readFileSync, existsSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-const exec = promisify(execFile);
 const ROOT = process.env.SDLC_ROOT ?? process.cwd();
 
-export async function gh(args, opts = {}) {
-  const { stdout } = await exec('gh', args, { maxBuffer: 20 * 1024 * 1024, ...opts });
-  return stdout.trim();
+/**
+ * Run `gh`. A flag whose value is a DOCUMENT is delivered on stdin, never in argv.
+ *
+ * `execve(2)` fails with E2BIG when the argument block is too large: Linux caps a single
+ * argv entry at MAX_ARG_STRLEN — 32 pages, 131072 bytes — and the whole args+env block at a
+ * quarter of RLIMIT_STACK. argv is an operating-system channel sized for flags.
+ *
+ * Every body this pipeline posts is built from model output: a work order, a review, a diff,
+ * a failure packet. None of them has an upper bound, so putting one in argv makes the kernel
+ * limit a load-bearing assumption about how much an agent writes. It held until a council's
+ * eighth revision of one work order crossed 128 KiB; the plan reviewer had already APPROVED
+ * that plan, the post threw E2BIG, and the self-heal loop — seeing a failed plan stage —
+ * spent a second three-agent council to replace a plan that was never wrong.
+ *
+ * A size threshold with a fallback would have kept the same channel and guessed at the same
+ * ceiling. stdin has no such limit, gh takes `--body-file -` for exactly this, and one path
+ * for every body means there is no size at which behaviour changes.
+ *
+ * spawn rather than promisify(execFile), deliberately: execFile has no `input` option (that
+ * is execFileSync), so passing one is silently ignored and a command reading stdin — `gh api
+ * --input -` — hangs forever instead of failing.
+ */
+const DOCUMENT_FLAGS = new Map([
+  ['--body', '--body-file'],
+  ['-b', '--body-file'],
+  ['--notes', '--notes-file'],
+]);
+
+function viaStdin(args, input) {
+  const i = args.findIndex((a, n) => DOCUMENT_FLAGS.has(a) && n < args.length - 1);
+  if (i === -1) return { args, input };
+  // stdin is one channel. Two documents in one call would silently deliver one of them.
+  if (input !== undefined) throw new Error(`gh: ${args[i]} and an explicit stdin in one call`);
+  const rest = args.slice(i + 2);
+  if (rest.some((a) => DOCUMENT_FLAGS.has(a))) throw new Error('gh: two document flags in one call');
+  return {
+    args: [...args.slice(0, i), DOCUMENT_FLAGS.get(args[i]), '-', ...rest],
+    input: args[i + 1],
+  };
+}
+
+export function gh(argv, { input: stdin, ...opts } = {}) {
+  const { args, input } = viaStdin(argv, stdin);
+  return new Promise((resolve, reject) => {
+    const child = spawn('gh', args, { stdio: ['pipe', 'pipe', 'pipe'], ...opts });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) return resolve(stdout.trim());
+      const err = new Error(`gh ${args[0]} failed (${code}): ${stderr.trim()}`);
+      err.stderr = stderr;
+      err.code = code;
+      reject(err);
+    });
+    child.stdin.on('error', () => { /* the child exited before reading the body */ });
+    child.stdin.end(input ?? '');
+  });
 }
 
 export async function ghJson(args) {
@@ -69,6 +124,28 @@ export const ERROR_LOG = process.env.SDLC_ERROR_LOG
 export function noteError(message) {
   try { appendFileSync(ERROR_LOG, 'sdlc: ' + String(message).trim() + '\n'); }
   catch { /* not on a runner, or read-only */ }
+}
+
+// An uncaught throw is a failure too, and the self-heal loop can only act on what it can
+// read.
+//
+// `spawn E2BIG` killed a step after the plan had been APPROVED. The error went to stderr and
+// nowhere else, because only `die()` writes the breadcrumb — so the fixer saw `unknown` with
+// the step's name as its entire evidence, could not tell a posting failure from a crashed
+// planner, and re-ran the whole council to repair a `gh` call. A classifier reading the real
+// message would have had somewhere to start.
+//
+// Registered here because every runner script imports this module. Exit 1 afterwards, since
+// swallowing an uncaught error would turn a broken step into a green one.
+for (const event of ['uncaughtException', 'unhandledRejection']) {
+  process.on(event, (err) => {
+    const message = err instanceof Error ? (err.code ? err.code + ': ' + err.message : err.message)
+                                         : String(err);
+    process.stderr.write('sdlc: ' + event + ': ' + message + '\n');
+    if (err instanceof Error && err.stack) process.stderr.write(err.stack + '\n');
+    noteError(message);
+    process.exit(1);
+  });
 }
 
 export function die(message, code = 1) {
