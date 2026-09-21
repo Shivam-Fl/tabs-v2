@@ -9,7 +9,7 @@
     "plan": 0,
     "ci": 0,
     "review": 4,
-    "qa": 0
+    "qa": 1
   },
   "budget": {
     "minutes": 0,
@@ -58,7 +58,7 @@
     "ac-1"
   ],
   "created_at": "2026-09-21T17:42:52.417Z",
-  "updated_at": "2026-09-21T18:51:02.839Z",
+  "updated_at": "2026-09-21T18:51:24.185Z",
   "history": [
     {
       "at": "2026-09-21T17:42:52.417Z",
@@ -244,6 +244,11 @@
       "at": "2026-09-21T18:51:02.839Z",
       "agent": "reviewer",
       "action": "-> qa"
+    },
+    {
+      "at": "2026-09-21T18:51:24.185Z",
+      "agent": "qa",
+      "action": "qa attempt 1"
     }
   ],
   "resume_at": "implement",
