@@ -1,14 +1,14 @@
 {
   "issue": 3,
   "pr": 7,
-  "state": "needs-human",
+  "state": "implementing",
   "owner": null,
   "lock_expires": null,
   "lock_run": null,
   "attempts": {
-    "plan": 2,
+    "plan": 0,
     "ci": 0,
-    "review": 1,
+    "review": 0,
     "qa": 0
   },
   "budget": {
@@ -56,7 +56,7 @@
   ],
   "review_root_caused": [],
   "created_at": "2026-09-21T17:42:52.417Z",
-  "updated_at": "2026-09-21T18:06:16.585Z",
+  "updated_at": "2026-09-21T18:31:01.456Z",
   "history": [
     {
       "at": "2026-09-21T17:42:52.417Z",
@@ -137,6 +137,21 @@
       "at": "2026-09-21T18:06:16.585Z",
       "agent": "self-heal",
       "action": "-> needs-human"
+    },
+    {
+      "at": "2026-09-21T18:31:01.456Z",
+      "agent": "human",
+      "action": "lock released"
+    },
+    {
+      "at": "2026-09-21T18:31:01.456Z",
+      "agent": "human",
+      "action": "budget reset (was {\"plan\":2,\"ci\":0,\"review\":1,\"qa\":0})"
+    },
+    {
+      "at": "2026-09-21T18:31:01.456Z",
+      "agent": "human",
+      "action": "-> implementing"
     }
   ],
   "resume_at": "implement",
