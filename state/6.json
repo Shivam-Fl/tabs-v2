@@ -138,14 +138,19 @@
       "at": "2026-09-21T20:30:51.629Z",
       "agent": "system",
       "action": "lock released"
+    },
+    {
+      "at": "2026-09-21T21:25:24.937Z",
+      "agent": "router",
+      "action": "route plan -> implement -> review -> qa (model, confidence 90)"
     }
   ],
   "flow_plan": {
     "kind": "feature",
-    "confidence": 85,
+    "confidence": 90,
     "matched_rule": null,
     "gates": {},
-    "decided_at": "2026-09-21T20:03:40.327Z"
+    "decided_at": "2026-09-21T21:25:24.937Z"
   },
   "resume_at": "plan",
   "stopped_at": "plan",
