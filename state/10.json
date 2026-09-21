@@ -15,7 +15,14 @@
     "minutes": 0,
     "cap_minutes": 120
   },
-  "touch_paths": [],
+  "touch_paths": [
+    "public/index.html",
+    "src/server.js",
+    "test/xss.test.js",
+    "test/server.test.js",
+    "test/xss.test.js",
+    "test/server.test.js"
+  ],
   "acceptance": [],
   "planned_route": [
     "plan",
