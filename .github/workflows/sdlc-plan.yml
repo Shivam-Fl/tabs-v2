@@ -130,6 +130,9 @@ jobs:
         # still being worked on. So the job cap is generous, and this sits under it.
         timeout-minutes: 45
         uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e   # v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ steps.prov.outputs.base_url }}
+          ANTHROPIC_CUSTOM_HEADERS: ${{ steps.prov.outputs.headers }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -195,6 +198,9 @@ jobs:
         # still being worked on. So the job cap is generous, and this sits under it.
         timeout-minutes: 45
         uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e   # v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ steps.prov.outputs.base_url }}
+          ANTHROPIC_CUSTOM_HEADERS: ${{ steps.prov.outputs.headers }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -234,6 +240,9 @@ jobs:
         # still being worked on. So the job cap is generous, and this sits under it.
         timeout-minutes: 45
         uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e   # v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ steps.prov.outputs.base_url }}
+          ANTHROPIC_CUSTOM_HEADERS: ${{ steps.prov.outputs.headers }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -266,6 +275,9 @@ jobs:
         # still being worked on. So the job cap is generous, and this sits under it.
         timeout-minutes: 45
         uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e   # v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ steps.prov.outputs.base_url }}
+          ANTHROPIC_CUSTOM_HEADERS: ${{ steps.prov.outputs.headers }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -332,6 +344,9 @@ jobs:
         # still being worked on. So the job cap is generous, and this sits under it.
         timeout-minutes: 45
         uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e   # v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ steps.prov.outputs.base_url }}
+          ANTHROPIC_CUSTOM_HEADERS: ${{ steps.prov.outputs.headers }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

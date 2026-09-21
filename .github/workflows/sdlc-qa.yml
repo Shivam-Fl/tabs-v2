@@ -237,6 +237,8 @@ jobs:
         timeout-minutes: 75
         uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e   # v1
         env:
+          ANTHROPIC_BASE_URL: ${{ steps.prov.outputs.base_url }}
+          ANTHROPIC_CUSTOM_HEADERS: ${{ steps.prov.outputs.headers }}
           PREVIEW_URL: ${{ steps.ctx.outputs.url }}
           BASE_BRANCH: ${{ steps.base.outputs.branch }}
           # Named explicitly, because "with trace/video on" does not say where. QA wrote its

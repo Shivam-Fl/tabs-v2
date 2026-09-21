@@ -32,5 +32,16 @@ if (p.headers && typeof p.headers === 'object') {
     .join('\n');
 }
 
+// Emitted BOTH ways on purpose.
+//
+// `settings.env` is what the action documents, and it does not reach the CLI process: a run
+// logged `INPUT_SETTINGS` carrying the base URL and, three lines later, `ANTHROPIC_BASE_URL:`
+// empty. The agent then ran `--model kimi-k3` against Anthropic's own endpoint, which
+// rejected it in 0.7 seconds with `is_error` and no message — which reads exactly like a
+// model that cannot cope, and is nothing of the kind.
+//
+// So the workflow also sets them as real step env, which is the thing that actually works.
 setOutput('settings', JSON.stringify(Object.keys(env).length ? { env } : {}));
+setOutput('base_url', env.ANTHROPIC_BASE_URL ?? '');
+setOutput('headers', env.ANTHROPIC_CUSTOM_HEADERS ?? '');
 setOutput('uses_provider', p.base_url ? 'true' : 'false');
