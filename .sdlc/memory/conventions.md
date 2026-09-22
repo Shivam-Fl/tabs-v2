@@ -1,26 +1,30 @@
 # Conventions
 
-## Code
-- ES modules, Node 22, no transpiler. `.js` for libraries, `.mjs` for executable scripts.
-- Pure logic in `scripts/lib/`, IO at the edges. Anything worth testing must be importable
-  without a network.
-- No dependencies unless a few lines genuinely cannot do it. The only runtime dep is
-  `js-yaml`, added because hand-rolling YAML parsing is the kind of clever that breaks at 3am.
-- Shell out to `gh` rather than adding an API SDK.
+## Stack
+- Node 20+ standard library only. Zero runtime dependencies.
+- `node:http` server, no framework, no build step.
+- `node:test` + `node:assert` — no test framework.
 
-## Guards fail closed
-Every validator, allowlist and parser refuses on input it does not understand. A guard that
-silently ignores the unrecognised case reports success for something it never checked — worse
-than having no guard, because it is trusted.
+## Money
+- Integer paise everywhere inside the system. Floats appear only at the UI display boundary.
+- Splits distribute remainder one paise at a time in member insertion order (deterministic).
+- `src/money.js` — pure functions, no I/O. `src/domain.js` — pure functions, no I/O.
 
-## Comments
-Explain **why**, never what. A comment restating the code is noise; a comment naming the
-failure mode a line prevents is the reason the line survives the next refactor.
+## Server patterns
+- JSON API with explicit error responses: `{ error: { code: '...', message: '...' } }`.
+- Error codes: `INVALID_JSON`, `METHOD_NOT_ALLOWED`, `GROUP_NAME_TAKEN`, `BALANCES_INVARIANT`.
+- Body size limit: 64 KB (returns 400 `INVALID_JSON`).
+- Non-JSON primitives (`null`, `[]`, `"string"`, `123`) in POST bodies → 400 `INVALID_JSON`.
 
 ## Tests
-`node --test`, no framework. Test the failure, not the happy path — the interesting assertions
-are the ones that fail when a guard regresses.
+- `node --test test/` is `sdlc:verify`.
+- Unit tests for pure logic in `src/money.js` and `src/domain.js`.
+- Integration tests boot the server on an ephemeral port.
+
+## UI
+- Single `public/index.html` with inline `<script>` — no bundler, no framework.
+- Two views: `#view-create-group` and `#view-group` (toggled via `.hidden` class).
+- Form errors clear immediately when the user corrects the invalid input (not only on next submit).
 
 ## PRs
-Conventional commit subject. Body says what changed and why, lists the acceptance criteria,
-and names anything deliberately left out of scope.
+- Conventional commit subject. Body lists what changed, why, and acceptance criteria.
