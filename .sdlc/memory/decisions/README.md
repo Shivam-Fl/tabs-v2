@@ -2,11 +2,12 @@
 
 One file per decision that would otherwise be re-litigated: `ADR-NNN-short-title.md`.
 
-Each states the context, the decision, what was rejected and why, and the date. A decision
-without its rejected alternatives is a preference; with them it is an argument a future agent
-can check against its own situation rather than guess at.
+## Recorded decisions
 
-Written when a choice costs something to reverse — a data model, an auth approach, a
-dependency, a convention the whole repo now follows. Not for anything a diff already explains.
-
-Empty for now, apart from the framework's own. It fills as the system works.
+| ADR | Title |
+|---|---|
+| [ADR-0001](ADR-0001-node-20-standard-library-only-zero-dependencies.md) | Node 20+ standard library only, zero dependencies |
+| [ADR-0002](ADR-0002-money-is-integer-paise-floats-only-at-the-ui-boundary.md) | Money is integer paise; floats only at the UI boundary |
+| [ADR-0003](ADR-0003-splits-distribute-the-remainder-settlement-is-greedy-and-det.md) | Splits distribute remainder; settlement is greedy and deterministic |
+| [ADR-0004](ADR-0004-single-json-file-persistence-behind-src-store-js.md) | Single JSON file persistence behind `src/store.js` |
+| [ADR-0005](ADR-0005-balances-derive-from-an-append-only-ledger-of-expenses-and-s.md) | Balances derive from append-only ledger of expenses and settlements |
