@@ -4,9 +4,11 @@ import {
   createGroup,
   addExpense,
   getExpenses,
+  recordSettlement,
   calculateBalances,
   calculateSettlement,
   InvalidInputError,
+  SettlementDuplicateError,
 } from '../src/domain.js';
 
 test('createGroup assigns id, preserves member order, sets createdAt', () => {
@@ -16,6 +18,9 @@ test('createGroup assigns id, preserves member order, sets createdAt', () => {
   assert.deepStrictEqual(group.members.map((m) => m.id), ['Alice', 'Bob', 'Charlie']);
   assert.ok(group.createdAt);
   assert.deepStrictEqual(group.expenses, []);
+  // The second half of the ledger starts empty, the same way the first one does, so a
+  // group created through the API has the shape a recorded settlement needs.
+  assert.deepStrictEqual(group.settlements, []);
 });
 
 test('addExpense returns new group with expense appended, original unchanged', () => {
@@ -461,6 +466,202 @@ test('calculateBalances handles equal-split and share-split expenses in the same
     { memberId: 'Meera', paise: 150000 },
   ]);
   assert.strictEqual(balances.reduce((sum, b) => sum + b.paise, 0), 0);
+});
+
+// ── Settlements: the second half of the ledger (ADR-0005) ────────────────────
+
+test('recordSettlement appends the entry and leaves the original group unchanged', () => {
+  const group = tripGroup();
+  const updated = recordSettlement(group, { from: 'Meera', to: 'Asha', amountPaise: 450000 });
+
+  assert.strictEqual(group.settlements.length, 0, 'the original group was mutated');
+  assert.strictEqual(updated.settlements.length, 1);
+  const entry = updated.settlements[0];
+  assert.ok(entry.id, 'a settlement needs an id to be referenceable');
+  assert.strictEqual(entry.from, 'Meera');
+  assert.strictEqual(entry.to, 'Asha');
+  assert.strictEqual(entry.amountPaise, 450000);
+  assert.ok(entry.createdAt);
+  // Recording a settlement adds an entry; it does not touch the expenses beside it.
+  assert.deepStrictEqual(updated.expenses, group.expenses);
+});
+
+test('recordSettlement rejects a from or to that is not a member of the group', () => {
+  const group = tripGroup();
+  for (const bad of [{ from: 'Stranger', to: 'Asha' }, { from: 'Asha', to: 'Stranger' }]) {
+    assert.throws(
+      () => recordSettlement(group, { ...bad, amountPaise: 1000 }),
+      (err) => err instanceof InvalidInputError && err.code === 'SETTLEMENT_MEMBER_UNKNOWN',
+      `accepted ${JSON.stringify(bad)}`,
+    );
+  }
+  // A non-string reaches the same check; it must be refused there rather than at the
+  // `.trim()` that builds the entry, which would have thrown a TypeError out as a 500.
+  for (const bad of [null, 42, {}, ['Meera']]) {
+    assert.throws(
+      () => recordSettlement(group, { from: bad, to: 'Asha', amountPaise: 1000 }),
+      (err) => err instanceof InvalidInputError && err.code === 'SETTLEMENT_MEMBER_UNKNOWN',
+      `accepted ${JSON.stringify(bad)} as from`,
+    );
+  }
+  assert.strictEqual(group.settlements.length, 0, 'a rejected settlement must not be written');
+});
+
+test('recordSettlement rejects from === to with SETTLEMENT_SELF', () => {
+  const group = tripGroup();
+  assert.throws(
+    () => recordSettlement(group, { from: 'Asha', to: 'Asha', amountPaise: 1000 }),
+    (err) => err instanceof InvalidInputError && err.code === 'SETTLEMENT_SELF',
+  );
+  assert.strictEqual(group.settlements.length, 0, 'a rejected settlement must not be written');
+});
+
+test('recordSettlement rejects a non-positive or non-integer amountPaise', () => {
+  for (const bad of [0, -1, 1.5, '450000', null, undefined, NaN]) {
+    const group = tripGroup();
+    assert.throws(
+      () => recordSettlement(group, { from: 'Meera', to: 'Asha', amountPaise: bad }),
+      (err) => err instanceof InvalidInputError && err.code === 'AMOUNT_INVALID',
+      `accepted ${JSON.stringify(bad)} as amountPaise`,
+    );
+    assert.strictEqual(group.settlements.length, 0, 'a rejected settlement must not be written');
+  }
+});
+
+// AC-4: the idempotency guard. A double-click or a replayed request must not turn one
+// debt into two, and the refusal has to be an error rather than a silent no-op so the
+// UI has something to show the user who clicked twice.
+test('recordSettlement refuses a duplicate (from, to, amountPaise)', () => {
+  const once = recordSettlement(tripGroup(), { from: 'Meera', to: 'Asha', amountPaise: 450000 });
+  assert.throws(
+    () => recordSettlement(once, { from: 'Meera', to: 'Asha', amountPaise: 450000 }),
+    (err) =>
+      err instanceof SettlementDuplicateError &&
+      err.name === 'SettlementDuplicateError' &&
+      err.code === 'SETTLEMENT_DUPLICATE',
+  );
+  assert.strictEqual(once.settlements.length, 1, 'the duplicate was appended anyway');
+});
+
+// The guard is on the triple, not on the pair. Two genuinely different settlements
+// between the same members — another amount, or the other direction — are real entries
+// and have to be recordable, or the guard is refusing money that did move.
+test('recordSettlement accepts a same-pair settlement for a different amount or direction', () => {
+  const once = recordSettlement(tripGroup(), { from: 'Meera', to: 'Asha', amountPaise: 450000 });
+  const twice = recordSettlement(once, { from: 'Meera', to: 'Asha', amountPaise: 50000 });
+  const thrice = recordSettlement(twice, { from: 'Asha', to: 'Meera', amountPaise: 450000 });
+  assert.strictEqual(thrice.settlements.length, 3);
+});
+
+test('recordSettlement rejects a non-object body with INVALID_JSON', () => {
+  for (const body of [null, [], 'settlement', 123]) {
+    const group = tripGroup();
+    assert.throws(
+      () => recordSettlement(group, body),
+      (err) => err instanceof InvalidInputError && err.code === 'INVALID_JSON',
+    );
+    assert.strictEqual(group.settlements.length, 0, 'a rejected settlement must not be written');
+  }
+});
+
+// AC-1: a settlement is the mirror of an expense. The payer is down by the amount, so
+// paying it moves them up towards zero; the payee is up by it and moves down.
+test('calculateBalances after one settlement moves from up by amountPaise and to down by it', () => {
+  const settled = recordSettlement(seededTrip(), {
+    from: 'Meera',
+    to: 'Asha',
+    amountPaise: 100000,
+  });
+  assert.deepStrictEqual(calculateBalances(settled), [
+    { memberId: 'Asha', paise: 350000 },
+    { memberId: 'Rahul', paise: 0 },
+    { memberId: 'Meera', paise: -350000 },
+  ]);
+});
+
+// AC-5, the test it names: built through the public API — createGroup + addExpense +
+// recordSettlement — and derived once. There is no stored balance field on the group to
+// have been mutated into this answer, so it passes only if calculateBalances applies the
+// settlement entries as part of the derivation.
+test('calculateBalances on the seeded Goa trip plus Meera pays Asha 450000 returns all zeros', () => {
+  const settled = recordSettlement(seededTrip(), {
+    from: 'Meera',
+    to: 'Asha',
+    amountPaise: 450000,
+  });
+  const balances = calculateBalances(settled);
+  assert.deepStrictEqual(balances, [
+    { memberId: 'Asha', paise: 0 },
+    { memberId: 'Rahul', paise: 0 },
+    { memberId: 'Meera', paise: 0 },
+  ]);
+  assert.strictEqual(balances.reduce((sum, b) => sum + b.paise, 0), 0);
+  assert.ok(!('balances' in settled), 'the group grew a stored balance field');
+});
+
+// AC-1: what the settlement panel shows once the only transfer is done — nothing left to
+// clear. The derivation, not the write, is what makes the pending list empty.
+test('calculateSettlement after the recorded Goa settlement finds nothing left to clear', () => {
+  const settled = recordSettlement(seededTrip(), {
+    from: 'Meera',
+    to: 'Asha',
+    amountPaise: 450000,
+  });
+  assert.deepStrictEqual(calculateSettlement(calculateBalances(settled), settled.members), []);
+});
+
+// Insertion order, not a set: two settlements between the same pair accumulate, and the
+// derivation reads them in the order they were written.
+test('calculateBalances applies two settlements between the same pair cumulatively', () => {
+  const one = recordSettlement(seededTrip(), { from: 'Meera', to: 'Asha', amountPaise: 100000 });
+  const two = recordSettlement(one, { from: 'Meera', to: 'Asha', amountPaise: 50000 });
+  const balances = calculateBalances(two);
+  assert.deepStrictEqual(balances, [
+    { memberId: 'Asha', paise: 300000 },
+    { memberId: 'Rahul', paise: 0 },
+    { memberId: 'Meera', paise: -300000 },
+  ]);
+  assert.strictEqual(balances.reduce((sum, b) => sum + b.paise, 0), 0);
+});
+
+// Backwards compatibility: every group written before this change has no `settlements`
+// key at all, and a missing key has to mean the same thing as an empty one.
+test('calculateBalances treats a group with no settlements key the same as an empty array', () => {
+  const withoutKey = { ...seededTrip() };
+  delete withoutKey.settlements;
+  assert.ok(!('settlements' in withoutKey));
+
+  assert.deepStrictEqual(calculateBalances(withoutKey), calculateBalances(seededTrip()));
+  assert.deepStrictEqual(calculateBalances(withoutKey), [
+    { memberId: 'Asha', paise: 450000 },
+    { memberId: 'Rahul', paise: 0 },
+    { memberId: 'Meera', paise: -450000 },
+  ]);
+});
+
+// AC-5: the invariant has to cover the new entry type too, not just expenses. A
+// settlement that credits or debits an id the group no longer lists drops that amount out
+// of the projection, so the guard fires rather than settling a group on wrong numbers.
+test('calculateBalances throws when a settlement references a member outside the group', () => {
+  const corrupt = [
+    { from: 'Ghost', to: 'Asha', amountPaise: 500 },
+    { from: 'Asha', to: 'Ghost', amountPaise: 500 },
+  ];
+  for (const settlement of corrupt) {
+    const group = {
+      id: 'corrupt',
+      name: 'Corrupt',
+      members: [{ id: 'Asha', name: 'Asha' }, { id: 'Rahul', name: 'Rahul' }],
+      expenses: [],
+      settlements: [{ id: 's1', ...settlement }],
+      createdAt: new Date().toISOString(),
+    };
+    assert.throws(
+      () => calculateBalances(group),
+      /net to zero/,
+      `accepted ${JSON.stringify(settlement)} as a balanced group`,
+    );
+  }
 });
 
 test('calculateSettlement on the seeded Goa balances returns exactly Meera pays Asha 450000', () => {

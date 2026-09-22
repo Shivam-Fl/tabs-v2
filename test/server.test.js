@@ -21,6 +21,14 @@ async function get(path, baseUrl) {
   return { status: res.status, data };
 }
 
+// Only used to prove the write path refuses everything that is not a POST.
+async function del(path, baseUrl) {
+  const url = new URL(path, baseUrl);
+  const res = await fetch(url, { method: 'DELETE' });
+  const data = await res.json();
+  return { status: res.status, data };
+}
+
 test('POST /api/groups returns 201 with the new group', async () => {
   const store = createStore({ memory: true });
   const { close, url } = await start({ port: 0, store });
@@ -690,7 +698,10 @@ test('GET /api/groups/:id/settlement after Hotel and Dinner returns exactly Meer
   }
 });
 
-// AC-4: a group with nothing in it is an empty settlement, not an error.
+// AC-4: a group with nothing in it is an empty settlement, not an error. `recorded` is
+// present and empty on a group that has never recorded anything — including a group
+// written before settlements existed, which is why the getter defaults rather than
+// reading the key back.
 test('GET /api/groups/:id/settlement on a group with no expenses returns an empty list', async () => {
   const store = createStore({ memory: true });
   const { close, url } = await start({ port: 0, store });
@@ -699,6 +710,7 @@ test('GET /api/groups/:id/settlement on a group with no expenses returns an empt
     const { status, data } = await get(`/api/groups/${groupId}/settlement`, url);
     assert.strictEqual(status, 200);
     assert.deepStrictEqual(data.settlement, []);
+    assert.deepStrictEqual(data.recorded, []);
   } finally {
     close();
   }
@@ -755,6 +767,267 @@ test('the derived endpoints return 500 BALANCES_INVARIANT when the stored group 
       assert.strictEqual(body.error.code, 'BALANCES_INVARIANT');
       assert.match(body.error.message, /net to zero/);
     }
+  } finally {
+    close();
+  }
+});
+
+// ── POST /api/groups/:id/settlements: the write path (#5) ────────────────────
+//
+// The plural path is the write; the singular one above stays the read-only computed
+// view. They are separate routes on purpose, so a client cannot mistake a GET for a
+// way to record something.
+
+// AC-1 over HTTP. Hotel ₹9,000 paid by Asha and Dinner ₹4,500 paid by Rahul, both split
+// three ways, leaves Meera owing Asha ₹4,500 — the one transfer the panel shows.
+test('POST /api/groups/:id/settlements records the transfer and returns 201', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    await seedTripExpenses(groupId, url);
+
+    const { status, data } = await post(`/api/groups/${groupId}/settlements`, {
+      from: 'Meera',
+      to: 'Asha',
+      amountPaise: 450000,
+    }, url);
+
+    assert.strictEqual(status, 201);
+    assert.ok(data.settlement.id, 'the recorded entry needs its id');
+    assert.strictEqual(data.settlement.from, 'Meera');
+    assert.strictEqual(data.settlement.to, 'Asha');
+    assert.strictEqual(data.settlement.amountPaise, 450000);
+    assert.ok(data.settlement.createdAt);
+    assert.strictEqual(store.load()[groupId].settlements.length, 1);
+  } finally {
+    close();
+  }
+});
+
+// AC-1 end to end: the balances panel is showing Asha +450000, Rahul 0, Meera -450000
+// and the settlement panel one transfer. Recording that exact transfer has to take every
+// balance to zero and leave nothing pending.
+test('after the recorded transfer every balance is zero and nothing is pending', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    await seedTripExpenses(groupId, url);
+    await post(`/api/groups/${groupId}/settlements`, {
+      from: 'Meera',
+      to: 'Asha',
+      amountPaise: 450000,
+    }, url);
+
+    const balances = await get(`/api/groups/${groupId}/balances`, url);
+    assert.strictEqual(balances.status, 200);
+    assert.deepStrictEqual(balances.data.balances, [
+      { memberId: 'Asha', paise: 0 },
+      { memberId: 'Rahul', paise: 0 },
+      { memberId: 'Meera', paise: 0 },
+    ]);
+
+    const settlement = await get(`/api/groups/${groupId}/settlement`, url);
+    assert.strictEqual(settlement.status, 200);
+    assert.deepStrictEqual(settlement.data.settlement, []);
+    assert.strictEqual(settlement.data.recorded.length, 1);
+    assert.strictEqual(settlement.data.recorded[0].amountPaise, 450000);
+  } finally {
+    close();
+  }
+});
+
+// AC-3 over HTTP: from all zeros, a ₹10 expense paid by Asha and split three ways
+// produces balances of +666/-333/-333, so the pending list covers only the new expense —
+// two transfers of 333 paise, tie-broken into member insertion order. The ₹4,500 already
+// recorded stays in `recorded` and does not re-enter the derivation as a pending one.
+test('GET /settlement carries done entries beside a pending list they are not in', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    await seedTripExpenses(groupId, url);
+    await post(`/api/groups/${groupId}/settlements`, {
+      from: 'Meera',
+      to: 'Asha',
+      amountPaise: 450000,
+    }, url);
+    await post(`/api/groups/${groupId}/expenses`, {
+      description: 'Taxi',
+      amountPaise: 1000,
+      payerId: 'Asha',
+      splitMemberIds: tripMembers(),
+    }, url);
+
+    const { status, data } = await get(`/api/groups/${groupId}/settlement`, url);
+    assert.strictEqual(status, 200);
+    assert.deepStrictEqual(data.settlement, [
+      { from: 'Rahul', to: 'Asha', amountPaise: 333 },
+      { from: 'Meera', to: 'Asha', amountPaise: 333 },
+    ]);
+    assert.strictEqual(data.recorded.length, 1);
+    assert.strictEqual(data.recorded[0].from, 'Meera');
+    assert.strictEqual(data.recorded[0].amountPaise, 450000);
+
+    const balances = await get(`/api/groups/${groupId}/balances`, url);
+    assert.deepStrictEqual(balances.data.balances, [
+      { memberId: 'Asha', paise: 666 },
+      { memberId: 'Rahul', paise: -333 },
+      { memberId: 'Meera', paise: -333 },
+    ]);
+  } finally {
+    close();
+  }
+});
+
+// AC-4 over HTTP: the button's disabled state covers one tab, so the refusal has to live
+// on the server. The second identical POST appends nothing and says why.
+test('POST /api/groups/:id/settlements refuses a duplicate with 409 SETTLEMENT_DUPLICATE', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    await seedTripExpenses(groupId, url);
+    const body = { from: 'Meera', to: 'Asha', amountPaise: 450000 };
+
+    const first = await post(`/api/groups/${groupId}/settlements`, body, url);
+    assert.strictEqual(first.status, 201);
+
+    const second = await post(`/api/groups/${groupId}/settlements`, body, url);
+    assert.strictEqual(second.status, 409);
+    assert.strictEqual(second.data.error.code, 'SETTLEMENT_DUPLICATE');
+    assert.strictEqual(second.data.error.message, 'This settlement has already been recorded');
+
+    // The refusal is not a half-write: the ledger still holds exactly the one entry, and
+    // the group still reads back cleanly rather than 500ing on every later request.
+    assert.strictEqual(store.load()[groupId].settlements.length, 1);
+    const after = await get(`/api/groups/${groupId}/settlement`, url);
+    assert.strictEqual(after.status, 200);
+    assert.strictEqual(after.data.recorded.length, 1);
+  } finally {
+    close();
+  }
+});
+
+test('POST /api/groups/:id/settlements with an unknown from or to returns 400 SETTLEMENT_MEMBER_UNKNOWN', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    for (const body of [
+      { from: 'Stranger', to: 'Asha', amountPaise: 1000 },
+      { from: 'Asha', to: 'Stranger', amountPaise: 1000 },
+    ]) {
+      const { status, data } = await post(`/api/groups/${groupId}/settlements`, body, url);
+      assert.strictEqual(status, 400, `${JSON.stringify(body)} was accepted`);
+      assert.strictEqual(data.error.code, 'SETTLEMENT_MEMBER_UNKNOWN');
+    }
+    assert.deepStrictEqual(store.load()[groupId].settlements, []);
+  } finally {
+    close();
+  }
+});
+
+test('POST /api/groups/:id/settlements with a bad amountPaise returns 400 AMOUNT_INVALID', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    for (const amountPaise of [0, -500, 1.5, '450000']) {
+      const { status, data } = await post(`/api/groups/${groupId}/settlements`, {
+        from: 'Meera',
+        to: 'Asha',
+        amountPaise,
+      }, url);
+      assert.strictEqual(status, 400, `${JSON.stringify(amountPaise)} was accepted`);
+      assert.strictEqual(data.error.code, 'AMOUNT_INVALID');
+    }
+    assert.deepStrictEqual(store.load()[groupId].settlements, []);
+  } finally {
+    close();
+  }
+});
+
+for (const raw of NON_OBJECT_BODIES) {
+  test(`POST /api/groups/:id/settlements with body ${raw} returns 400 INVALID_JSON, not 500`, async () => {
+    const store = createStore({ memory: true });
+    const { close, url } = await start({ port: 0, store });
+    try {
+      const groupId = await createTrip(url);
+      const { status, data } = await postRaw(`/api/groups/${groupId}/settlements`, raw, url);
+      assert.strictEqual(status, 400);
+      assert.strictEqual(data.error.code, 'INVALID_JSON');
+      assert.doesNotMatch(data.error.message, /destructur/i);
+      assert.strictEqual(store.load()[groupId].settlements.length, 0);
+    } finally {
+      close();
+    }
+  });
+}
+
+test('POST /api/groups/:id/settlements on a non-existent group returns 404 GROUP_NOT_FOUND', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const { status, data } = await post('/api/groups/nonexistent-id/settlements', {
+      from: 'Meera',
+      to: 'Asha',
+      amountPaise: 1000,
+    }, url);
+    assert.strictEqual(status, 404);
+    assert.strictEqual(data.error.code, 'GROUP_NOT_FOUND');
+    assert.deepStrictEqual(store.load(), {});
+  } finally {
+    close();
+  }
+});
+
+// AC-2: the done state is read back from the store, not kept in the page, so a reload —
+// a fresh server over the same data — has to show the same thing. The write goes through
+// the real store rather than the in-memory shortcut for the same reason.
+test('a recorded settlement and its zero balances survive a page reload', async () => {
+  const store = createStore({ memory: true });
+  let { close, url } = await start({ port: 0, store });
+  const groupId = await createTrip(url);
+  await seedTripExpenses(groupId, url);
+  await post(`/api/groups/${groupId}/settlements`, {
+    from: 'Meera',
+    to: 'Asha',
+    amountPaise: 450000,
+  }, url);
+  close();
+
+  ({ close, url } = await start({ port: 0, store }));
+  try {
+    const balances = await get(`/api/groups/${groupId}/balances`, url);
+    assert.deepStrictEqual(balances.data.balances, [
+      { memberId: 'Asha', paise: 0 },
+      { memberId: 'Rahul', paise: 0 },
+      { memberId: 'Meera', paise: 0 },
+    ]);
+    const settlement = await get(`/api/groups/${groupId}/settlement`, url);
+    assert.deepStrictEqual(settlement.data.settlement, []);
+    assert.strictEqual(settlement.data.recorded.length, 1);
+  } finally {
+    close();
+  }
+});
+
+// The write path is POST-only. Every other verb — including GET, which belongs to the
+// singular read path beside it — is refused rather than silently treated as a write.
+test('non-POST methods on /api/groups/:id/settlements return 405 METHOD_NOT_ALLOWED', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    const deleted = await del(`/api/groups/${groupId}/settlements`, url);
+    assert.strictEqual(deleted.status, 405);
+    assert.strictEqual(deleted.data.error.code, 'METHOD_NOT_ALLOWED');
+
+    const read = await get(`/api/groups/${groupId}/settlements`, url);
+    assert.strictEqual(read.status, 405);
+    assert.strictEqual(read.data.error.code, 'METHOD_NOT_ALLOWED');
   } finally {
     close();
   }

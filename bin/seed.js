@@ -13,6 +13,10 @@ const group = {
   name: 'Goa trip',
   members: members.map((m) => ({ id: m, name: m })),
   expenses: [],
+  // Written even though it is empty, so the fixture has the same shape createGroup
+  // produces. The fallback in the domain makes this unnecessary for correctness, but the
+  // fixture is what QA reads, and it should not be the one group missing a ledger half.
+  settlements: [],
   createdAt: new Date().toISOString(),
 };
 
