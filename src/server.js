@@ -240,11 +240,6 @@ async function handleRequest(req, res, store) {
 
   // POST /api/groups/:id/expenses
   if (route.resource === 'group_expenses' && req.method === 'POST') {
-    const data = store.load();
-    const group = data[route.groupId];
-    if (!group) {
-      return errorResponse(res, 'GROUP_NOT_FOUND', 'Group not found', 404);
-    }
     let body;
     try {
       body = await parseBody(req);
@@ -256,6 +251,17 @@ async function handleRequest(req, res, store) {
       parsed = JSON.parse(body);
     } catch {
       return errorResponse(res, 'INVALID_JSON', 'Invalid JSON', 400);
+    }
+    // The store is read here — after the last await in this handler — and written back
+    // below with nothing in between that can yield. Reading it before `parseBody` let two
+    // requests load the same snapshot, each append its own expense, and the second save
+    // drop the first: two 201s, one expense. Node runs this span to completion once it
+    // starts, which is what makes the read-modify-write atomic here; there is no lock
+    // because there is no longer a gap to guard.
+    const data = store.load();
+    const group = data[route.groupId];
+    if (!group) {
+      return errorResponse(res, 'GROUP_NOT_FOUND', 'Group not found', 404);
     }
     try {
       const updatedGroup = addExpense(group, parsed);

@@ -1,5 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   createGroup,
   addExpense,
@@ -375,6 +380,50 @@ test('calculateBalances on the seeded Goa trip returns Asha +450000, Rahul 0, Me
   // Project.md: per-group balances always net to zero. Asserted here as well as inside
   // the function so a future change that weakens the guard still fails this test.
   assert.strictEqual(balances.reduce((sum, b) => sum + b.paise, 0), 0);
+});
+
+// The review of #7 found bin/seed.js hand-building its group rather than going through
+// createGroup, so a rule added to createGroup would be bypassed by the seed and the seed
+// would write a group the live API could not have produced.
+//
+// Asserted by running the real script, not by rebuilding its group here: a copy of the
+// seed's construction inside this file can drift from bin/seed.js and then read as
+// coverage for a fixture it no longer describes. `createGroup` gives the group a random
+// id, so the script overrides it to 'seed-goa' — that override is the only intended
+// deviation from the live path, and it is what keeps the demo fixture addressable.
+const SEED_SCRIPT = fileURLToPath(new URL('../bin/seed.js', import.meta.url));
+
+test('bin/seed.js writes the Goa trip fixture, and it balances', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'seed-'));
+  const seedPath = path.join(tmpDir, 'groups.json');
+  try {
+    execFileSync(process.execPath, [SEED_SCRIPT], {
+      env: { ...process.env, STORE_PATH: seedPath },
+    });
+
+    const data = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
+    assert.deepStrictEqual(Object.keys(data), ['seed-goa']);
+
+    const group = data['seed-goa'];
+    assert.strictEqual(group.name, 'Goa trip');
+    assert.deepStrictEqual(group.members.map((m) => m.id), TRIP);
+    // The seeder's own expenses, in order and unchanged: the fixture the balances and
+    // settlement screens are read against.
+    assert.deepStrictEqual(
+      group.expenses.map((e) => [e.description, e.amountPaise, e.payerId, e.splitMemberIds]),
+      [
+        ['Hotel', 900000, 'Asha', TRIP],
+        ['Dinner', 450000, 'Rahul', TRIP],
+      ],
+    );
+    assert.deepStrictEqual(calculateBalances(group), [
+      { memberId: 'Asha', paise: 450000 },
+      { memberId: 'Rahul', paise: 0 },
+      { memberId: 'Meera', paise: -450000 },
+    ]);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test('calculateBalances on a group with no expenses returns zero for every member in order', () => {
