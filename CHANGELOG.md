@@ -9,6 +9,12 @@
 
 ### Fixed
 
+- Adding two expenses at the same time no longer loses one — both are persisted and returned
+  on the next fetch.
+
+- Marking a settlement no longer gets silently dropped when two people record one at the same
+  time — both are saved.
+
 - Marking a settlement done now updates everyone's balances to reflect it, the done state
   survives a page reload, and attempting to mark the same settlement twice is rejected
   rather than double-counting it.
