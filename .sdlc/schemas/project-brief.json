@@ -11,7 +11,11 @@
     "invariants",
     "commands",
     "deploy",
-    "decisions"
+    "decisions",
+    "research",
+    "assumptions",
+    "prd",
+    "trd"
   ],
   "additionalProperties": false,
   "properties": {
@@ -214,6 +218,486 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 100
+    },
+    "research": {
+      "type": "object",
+      "description": "What was learned from OUTSIDE this repository before deciding anything. A brief written without it is an opinion.",
+      "required": [
+        "questions",
+        "findings"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "questions": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "description": "What had to be true for this plan to be right, that the repo could not answer."
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 25,
+          "items": {
+            "type": "object",
+            "required": [
+              "claim",
+              "evidence",
+              "source"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "claim": {
+                "type": "string",
+                "maxLength": 600,
+                "description": "What was learned, stated so it could be wrong."
+              },
+              "evidence": {
+                "type": "string",
+                "maxLength": 1200,
+                "description": "What the source actually says. Not a paraphrase of the claim."
+              },
+              "source": {
+                "type": "string",
+                "maxLength": 500,
+                "description": "URL, or \"first-party: <where>\" when it came from the repo or the issue."
+              },
+              "confidence": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "affects": {
+                "type": "string",
+                "maxLength": 300,
+                "description": "Which decision below this changed. A finding that changed nothing is noise."
+              }
+            }
+          },
+          "description": "Each finding names the decision it moved."
+        },
+        "rejected_sources": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "description": "Sources looked at and not trusted, with why. Cheap to write, stops the next agent re-reading them."
+        }
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "maxItems": 15,
+      "items": {
+        "type": "object",
+        "required": [
+          "assumption",
+          "if_wrong"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "assumption": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "Stated as a fact someone could check."
+          },
+          "basis": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "Why it is believed — evidence, convention, or nothing."
+          },
+          "if_wrong": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "What breaks and how expensive it is to discover late."
+          },
+          "validate_by": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "The cheapest thing that would settle it."
+          }
+        }
+      },
+      "description": "What this brief takes for granted. Unstated assumptions are found on ticket nine."
+    },
+    "prd": {
+      "type": "object",
+      "description": "What is being built and for whom, before how.",
+      "required": [
+        "problem",
+        "users",
+        "jobs",
+        "scope",
+        "non_goals",
+        "success"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "problem": {
+          "type": "string",
+          "maxLength": 1500,
+          "description": "The problem in the world, not the feature list."
+        },
+        "users": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "required": [
+              "who",
+              "context",
+              "pain"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "who": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "context": {
+                "type": "string",
+                "maxLength": 400,
+                "description": "When and where they hit this."
+              },
+              "pain": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "sophistication": {
+                "type": "string",
+                "maxLength": 200
+              }
+            }
+          }
+        },
+        "jobs": {
+          "type": "array",
+          "maxItems": 15,
+          "items": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "description": "Jobs to be done, as outcomes the user wants, not features."
+        },
+        "scope": {
+          "type": "array",
+          "maxItems": 25,
+          "items": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "description": "In scope for v1."
+        },
+        "non_goals": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "description": "Deliberately not doing, with the reason. The most useful section here."
+        },
+        "success": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "required": [
+              "metric",
+              "target"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "metric": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "target": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "how_measured": {
+                "type": "string",
+                "maxLength": 400
+              }
+            }
+          },
+          "description": "Observable, with a number. \"Users like it\" is not one."
+        },
+        "constraints": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "description": "Budget, deadline, compliance, existing systems."
+        }
+      }
+    },
+    "trd": {
+      "type": "object",
+      "description": "The technical requirements the architecture has to satisfy.",
+      "required": [
+        "requirements"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "requirements": {
+          "type": "array",
+          "maxItems": 40,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "requirement",
+              "rationale"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "maxLength": 20,
+                "description": "TR-1, TR-2 …"
+              },
+              "requirement": {
+                "type": "string",
+                "maxLength": 600,
+                "description": "Testable. \"Fast\" is not; \"p95 under 400ms at 50 rps\" is."
+              },
+              "rationale": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "priority": {
+                "type": "string",
+                "enum": [
+                  "must",
+                  "should",
+                  "could"
+                ]
+              },
+              "verified_by": {
+                "type": "string",
+                "maxLength": 300,
+                "description": "The check that proves it — a test, a load run, a QA step."
+              }
+            }
+          }
+        },
+        "data_model": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {
+            "type": "object",
+            "required": [
+              "entity",
+              "holds"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "entity": {
+                "type": "string",
+                "maxLength": 120
+              },
+              "holds": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "keys": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "notes": {
+                "type": "string",
+                "maxLength": 400
+              }
+            }
+          },
+          "description": "The nouns and what each owns."
+        },
+        "interfaces": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "shape"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "Endpoint, queue, or module boundary."
+              },
+              "shape": {
+                "type": "string",
+                "maxLength": 800
+              },
+              "errors": {
+                "type": "string",
+                "maxLength": 500,
+                "description": "What the caller sees when it fails."
+              },
+              "idempotency": {
+                "type": "string",
+                "maxLength": 300
+              }
+            }
+          }
+        },
+        "nfrs": {
+          "type": "array",
+          "maxItems": 15,
+          "items": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "description": "Performance, availability, security, privacy, cost — each with a number."
+        }
+      }
+    },
+    "ui": {
+      "type": "object",
+      "description": "How it looks and behaves, decided once so twenty tickets do not each invent it.",
+      "additionalProperties": false,
+      "properties": {
+        "theme": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tokens": {
+              "type": "array",
+              "maxItems": 40,
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "value",
+                  "use"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 80,
+                    "description": "--color-bg, --space-3, --font-body …"
+                  },
+                  "value": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "use": {
+                    "type": "string",
+                    "maxLength": 300
+                  }
+                }
+              },
+              "description": "Design tokens as names and values. Every screen uses these and nothing else."
+            },
+            "dark_mode": {
+              "type": "string",
+              "maxLength": 400,
+              "description": "How it inverts, or why it does not exist."
+            },
+            "typography": {
+              "type": "string",
+              "maxLength": 600
+            },
+            "density": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "motion": {
+              "type": "string",
+              "maxLength": 300
+            }
+          }
+        },
+        "patterns": {
+          "type": "array",
+          "maxItems": 25,
+          "items": {
+            "type": "object",
+            "required": [
+              "pattern",
+              "rule"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "maxLength": 150,
+                "description": "Form, table, empty state, destructive action, toast …"
+              },
+              "rule": {
+                "type": "string",
+                "maxLength": 700,
+                "description": "The decision every ticket follows."
+              },
+              "example": {
+                "type": "string",
+                "maxLength": 500
+              }
+            }
+          },
+          "description": "Decided once. A pattern list is what stops the fifth screen looking like a different product."
+        },
+        "layouts": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "required": [
+              "screen",
+              "purpose",
+              "regions"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "screen": {
+                "type": "string",
+                "maxLength": 150
+              },
+              "purpose": {
+                "type": "string",
+                "maxLength": 400,
+                "description": "The one question this screen answers."
+              },
+              "regions": {
+                "type": "string",
+                "maxLength": 900,
+                "description": "The blocks and where they sit."
+              },
+              "states": {
+                "type": "string",
+                "maxLength": 600,
+                "description": "ideal / empty / loading / partial / error — all five, or say why one cannot happen."
+              },
+              "responsive": {
+                "type": "string",
+                "maxLength": 400,
+                "description": "What changes at narrow width."
+              }
+            }
+          }
+        },
+        "accessibility": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "description": "Contrast, focus order, keyboard paths, labels — the ones QA will check."
+        }
+      }
     }
   }
 }

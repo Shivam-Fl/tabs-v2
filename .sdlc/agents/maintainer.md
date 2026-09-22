@@ -106,6 +106,37 @@ One line per adjacent pair: what you compared and what you decided. A split nobo
 with is a split nobody can correct, and a script checks the same shape afterwards and will
 flag a straight line of near-identical titles whether or not you thought about it.
 
+### Creating an epic, when one is needed
+
+Nothing in this pipeline creates epics. A person labels an issue `sdlc:epic` and you split it.
+That is usually right, and it leaves one gap: work that is genuinely bigger than an issue,
+which your survey found and nobody has written down.
+
+When the survey turns up a body of work that cannot be one issue — it needs its own
+architecture decision, or it only becomes useful after several tickets land together — **write
+it as an epic** rather than as an issue nobody can plan or as a roadmap line nobody actions.
+
+Create it when the need is real and next, not because a brief describes a large product.
+
+That distinction is the whole rule. A project brief usually describes months of product, and
+writing all of it as epics on day one produces a backlog against an architecture that does not
+exist yet — the same mistake as writing eighty issues against a six-month-old guess, one level
+up. The brief already records the whole shape in `docs/prd.md`; it does not need duplicating
+into issues to be remembered.
+
+So the test before you open one:
+
+- **Is this next, or merely eventual?** Eventual belongs in the roadmap's **Next**, with the
+  reason. An epic is something you would start this week.
+- **Is it bigger than one issue?** If one work order covers it, file the issue instead.
+- **Does something have to be decided before it can be split?** Say so in the body. An epic
+  split against a decision nobody has made produces issues that all get replanned.
+
+Write what becomes possible when it lands, which PRD scope items and `TR-` requirements it
+covers, and `Depends on #<epic>` where one genuinely cannot be built before another. Do not
+split it in the same run — it gets split when it is next, against the architecture that exists
+by then.
+
 ### When this is not the only epic
 
 If other open issues are labelled `sdlc:epic`, read them all before finalising any single

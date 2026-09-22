@@ -10,6 +10,7 @@
 // wrong stack is discovered on ticket nine, after eight implementations have assumed it — and
 // a person reads it exactly once per repository.
 
+import { renderPrd, renderTrd, renderUi, renderResearch } from './lib/render-docs.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { gh, setOutput, die, repo as repoOf } from './lib/actions.js';
@@ -37,6 +38,25 @@ const existing = readdirSync('.sdlc/memory/decisions')
   .map((f) => Number(f.match(/^ADR-(\d+)/)?.[1]))
   .filter(Number.isInteger);
 let n = existing.length ? Math.max(...existing) + 1 : 1;
+
+// The product, technical, UI and research documents.
+//
+// These used to exist only as keys inside project-brief.json — one machine artifact nobody
+// opens. An engineer joining in month three reads `docs/`, and a PRD that lives only in a JSON
+// field is a PRD that was never written. Generated, so the brief stays the source of truth and
+// the files cannot drift from it.
+mkdirSync('docs', { recursive: true });
+const docs = [];
+for (const [file, body] of [
+  ['docs/prd.md', renderPrd(brief)],
+  ['docs/trd.md', renderTrd(brief)],
+  ['docs/ui.md', renderUi(brief)],
+  ['docs/research.md', renderResearch(brief)],
+]) {
+  if (!body) continue;
+  writeFileSync(file, `${body.replace(/\n{3,}/g, '\n\n').trimEnd()}\n`);
+  docs.push(file);
+}
 
 const adrs = [];
 for (const d of brief.decisions ?? []) {
@@ -115,6 +135,7 @@ const body = [
   '',
   '### Decisions recorded',
   ...adrs.map((f) => `- \`${f}\``),
+  ...(docs.length ? ['', '**Documents**', ...docs.map((f) => `- \`${f}\``)] : []),
   verbs.length ? `\n### package.json\n${verbs.map((v) => `- ${v}`).join('\n')}` : '',
   brief.commands.stubbed?.length
     ? `\n**Stubbed on purpose:** ${brief.commands.stubbed.join('; ')}`

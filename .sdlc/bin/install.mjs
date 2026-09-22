@@ -240,7 +240,9 @@ runtime:
   # opaque 500 on its Anthropic endpoint, which is a 400 wearing the wrong number.
   # {run} in a header value becomes the Actions run id: one stable id per conversation.
   provider:
-    base_url: ""        # e.g. https://opencode.ai/zen/go/v1
+    base_url: ""        # e.g. https://opencode.ai/zen/go  — NO trailing /v1: the action
+                        # appends /v1/messages itself, and a doubled /v1 returns a 404 that
+                        # the client reports as a missing model
     headers: {}         # e.g. { x-opencode-session: "sdlc-{run}" }
   # Model per STEP. Empty = the action's default. Council members inherit their stage.
   # Spend where a mistake is hardest to recover from: the diagnosis every later stage

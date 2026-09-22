@@ -38,7 +38,15 @@ const TOOLS = {
   router:            'Bash,Read,Grep,Glob,Write',
   // Read and Write only. A project planner with Edit would start building the thing it is
   // supposed to be deciding, and the whole point of the gate is that nothing exists yet.
-  project:           'Bash,Read,Grep,Glob,Write',
+  // WebSearch and WebFetch, because this is the one agent whose decisions are mostly about
+  // things that are not in the repository: which library is maintained, what a provider's API
+  // actually supports today, what the current version of a runtime is. It was asked to decide a
+  // stack for the life of a project with no way to look anything up, so it decided from memory
+  // — and a model's memory of a fast-moving ecosystem is a year stale by construction.
+  //
+  // Still no Edit: it writes one artifact and a script does the rest. Web content it reads is
+  // data, never instruction, which its pack states and the prompt repeats.
+  project:           'Bash,Read,Grep,Glob,Write,WebSearch,WebFetch',
 };
 
 const DEFAULT_TURNS = {
