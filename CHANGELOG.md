@@ -9,6 +9,10 @@
 
 ### Fixed
 
+- Marking a settlement done now updates everyone's balances to reflect it, the done state
+  survives a page reload, and attempting to mark the same settlement twice is rejected
+  rather than double-counting it.
+
 - Error messages on the expense form now clear as soon as you edit the field they were
   about, instead of lingering on screen until the next submit attempt.
 

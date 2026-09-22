@@ -9,6 +9,18 @@ export class InvalidInputError extends Error {
   }
 }
 
+// Its own class rather than an InvalidInputError, because the request was well formed and
+// the entry it describes is real — it is the *second* copy of it that cannot be recorded.
+// The server answers 409 rather than 400 so the client can tell "you sent nonsense" apart
+// from "you already did this", which is the difference between a bug and a double-click.
+export class SettlementDuplicateError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'SettlementDuplicateError';
+    this.code = 'SETTLEMENT_DUPLICATE';
+  }
+}
+
 // `null`, an array, a string and a number are all valid JSON, and destructuring any of
 // them throws a TypeError that the server reports as a 500 with the destructuring
 // message leaked to the client. Refuse them here so they leave as a 400 instead.
@@ -48,6 +60,7 @@ export function createGroup(input) {
     name: name.trim(),
     members: groupMembers,
     expenses: [],
+    settlements: [],
     createdAt: new Date().toISOString(),
   };
 }
@@ -172,6 +185,69 @@ export function getExpenses(group) {
 }
 
 /**
+ * Appends a settlement ledger entry: `from` paid `to` amountPaise outside the app.
+ * The second half of the append-only ledger (ADR-0005) — like addExpense it returns a new
+ * group and never mutates the one it was given, because the balances are derived from the
+ * whole history rather than kept alongside it.
+ */
+export function recordSettlement(group, input) {
+  requireObject(input);
+  const { from, to, amountPaise } = input;
+
+  // Membership first, and before anything reads `.trim()` off these, so a non-string
+  // leaves as a 400 naming the member rather than as a TypeError the server reports as a
+  // 500. The same check addExpense makes of payerId.
+  for (const [field, memberId] of [['from', from], ['to', to]]) {
+    if (typeof memberId !== 'string' || !group.members.some((m) => m.id === memberId)) {
+      throw new InvalidInputError(
+        'SETTLEMENT_MEMBER_UNKNOWN',
+        `Settlement ${field} "${memberId}" is not in this group`,
+      );
+    }
+  }
+  // A member paying themselves would be a ledger entry that moves nothing while still
+  // having to net to zero, which is a contradiction rather than a no-op.
+  if (from === to) {
+    throw new InvalidInputError(
+      'SETTLEMENT_SELF',
+      'A settlement needs two different members',
+    );
+  }
+  if (!Number.isInteger(amountPaise) || amountPaise <= 0) {
+    throw new InvalidInputError('AMOUNT_INVALID', 'Amount must be a positive integer (paise)');
+  }
+
+  // Groups written before settlements existed have no such key; absent means empty.
+  const settlements = group.settlements || [];
+
+  // The idempotency guard. A double-click, a retry or a replayed request must not turn one
+  // debt into two, and it is an exact match on the triple rather than on the pair, so two
+  // genuinely different settlements between the same members are still recordable.
+  const duplicate = settlements.some(
+    (entry) => entry.from === from.trim() && entry.to === to.trim() && entry.amountPaise === amountPaise,
+  );
+  if (duplicate) {
+    throw new SettlementDuplicateError('This settlement has already been recorded');
+  }
+
+  const newSettlement = {
+    id: crypto.randomUUID(),
+    // `from` and `to` are member ids, which createGroup stores trimmed, so the trim here
+    // is a no-op on everything this function accepts — it keeps the stored shape equal to
+    // the one addExpense writes for its own string fields.
+    from: from.trim(),
+    to: to.trim(),
+    amountPaise,
+    createdAt: new Date().toISOString(),
+  };
+
+  return {
+    ...group,
+    settlements: [...settlements, newSettlement],
+  };
+}
+
+/**
  * Per-member balances for a group: paise paid minus paise owed, in `group.members`
  * order. Positive means the group owes them, negative means they owe the group.
  */
@@ -195,14 +271,32 @@ export function calculateBalances(group) {
     }
   }
 
+  // The other half of the ledger. A settlement is the mirror of an expense: the payer is
+  // down by the amount and paying it moves them up towards zero, while the payee is up by
+  // it and receiving it moves them down. Both directions carry the same paise, so the
+  // total is unchanged and the check below still covers this entry type. Read in
+  // insertion order, cumulatively — two settlements between the same pair both count.
+  // Groups written before settlements existed have no such key; absent means empty.
+  for (const settlement of group.settlements || []) {
+    balances.set(
+      settlement.from,
+      (balances.get(settlement.from) || 0) + settlement.amountPaise,
+    );
+    balances.set(
+      settlement.to,
+      (balances.get(settlement.to) || 0) - settlement.amountPaise,
+    );
+  }
+
   const result = group.members.map((member) => ({
     memberId: member.id,
     paise: balances.get(member.id),
   }));
 
-  // Every expense credits its payer with exactly the amount it debits the split, so this
+  // Every expense credits its payer with exactly the amount it debits the split, and every
+  // settlement credits its payer with exactly the amount it debits its payee, so this
   // total is zero for anything the API could have written. A non-zero total means an
-  // expense credited or debited an id that `group.members` does not list, and the
+  // entry credited or debited an id that `group.members` does not list, and the
   // projection above dropped it — the store has been edited or migrated wrongly. Fail
   // loudly (project.md: balances always net to zero): a settlement built on numbers that
   // do not add up sends real money the wrong way, which is worse than an error page.
