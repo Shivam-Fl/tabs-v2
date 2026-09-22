@@ -90,3 +90,13 @@ jobs:
             Open ONE PR titled "memory: $(date -u +%F)" listing what you added, merged and
             deleted, with a reason for each. Never push to main.
             If nothing was worth keeping, open no PR and say so. An empty night is fine.
+
+      # The memory PR is opened by the pipeline's own token, so GitHub starts none of its
+      # `pull_request` workflows: the runs hold, report `failure` with zero jobs, and produce no
+      # check. The PR then shows a red that never ran, every night, to the person whose review it
+      # is waiting for. Dispatch is not held — the same reason sdlc-gate starts ci-verify itself.
+      - name: Start CI on the memory pull request
+        if: always()
+        continue-on-error: true
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: node .sdlc/bin/verify-memory-pr.mjs
