@@ -9,7 +9,7 @@
     "plan": 1,
     "ci": 0,
     "review": 1,
-    "qa": 0
+    "qa": 1
   },
   "budget": {
     "minutes": 0,
@@ -43,7 +43,7 @@
   "review_history": [],
   "review_root_caused": [],
   "created_at": "2026-09-21T20:01:58.283Z",
-  "updated_at": "2026-09-22T09:50:50.561Z",
+  "updated_at": "2026-09-22T09:51:14.410Z",
   "history": [
     {
       "at": "2026-09-21T20:02:18.866Z",
@@ -139,6 +139,11 @@
       "at": "2026-09-22T09:50:50.561Z",
       "agent": "reviewer",
       "action": "-> qa"
+    },
+    {
+      "at": "2026-09-22T09:51:14.410Z",
+      "agent": "qa",
+      "action": "qa attempt 1"
     }
   ],
   "flow_plan": {
