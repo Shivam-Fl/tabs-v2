@@ -15,7 +15,12 @@
     "minutes": 0,
     "cap_minutes": 120
   },
-  "touch_paths": [],
+  "touch_paths": [
+    "src/server.js",
+    "bin/seed.js",
+    "test/server.test.js",
+    "test/domain.test.js"
+  ],
   "acceptance": [],
   "planned_route": [
     "plan",
