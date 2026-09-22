@@ -45,6 +45,11 @@
   .balance-negative { color: #dc2626; }
   .balance-zero { color: #6b7280; }
   .transfer { background: #fff; padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+  /* A done transfer stays on the panel — it is a fact about the group, not a pending
+     action — but struck through and faded, with the tick standing in for the button it
+     no longer has. The ✓ is CSS-generated, so the stored text carries '(done)' as well. */
+  .transfer-done { opacity: 0.6; text-decoration: line-through; }
+  .transfer-done::before { content: '✓ '; }
 </style>
 </head>
 <body>
@@ -92,6 +97,7 @@
     </div>
     <div id="settlement-panel">
       <h2>Settlement</h2>
+      <div id="settlement-error" class="error"></div>
       <ul id="settlement-list" class="panel-list"></ul>
     </div>
     <div id="expense-list"></div>
@@ -146,6 +152,11 @@ async function api(path, method = 'GET', body = null) {
 }
 
 let currentGroupId = null;
+// The settlement list is rebuilt on every refresh, and the click listener below is
+// delegated on the list rather than re-attached per row, so it outlives any one render and
+// needs the member list of the group on screen. Kept beside currentGroupId and cleared
+// with it, so the two never describe different groups.
+let currentMembers = null;
 // The form is cleared only once the POST resolves, so a second submit while the first
 // is in flight posts a second expense. The handler holds this until it is done.
 let expenseSubmitting = false;
@@ -159,6 +170,7 @@ function showCreateView() {
   document.getElementById('view-create-group').classList.remove('hidden');
   document.getElementById('view-group').classList.add('hidden');
   currentGroupId = null;
+  currentMembers = null;
   loadGroups();
 }
 
@@ -221,19 +233,41 @@ function renderBalances(listEl, members, balances) {
   }
 }
 
-function renderSettlement(listEl, members, settlement) {
+function renderSettlement(listEl, members, pending, recorded) {
   listEl.innerHTML = '';
-  if (settlement.length === 0) {
+  // Done entries count as content: a group whose only transfer has been recorded has one
+  // line to show, not an empty-state placeholder.
+  if (pending.length === 0 && recorded.length === 0) {
     listEl.innerHTML = '<li class="empty-state">No settlements yet.</li>';
     return;
   }
-  for (const transfer of settlement) {
+  // Done first, so the panel reads as the history with what is still outstanding under it.
+  for (const entry of recorded) {
+    const from = members.find((m) => m.id === entry.from);
+    const to = members.find((m) => m.id === entry.to);
+    const li = document.createElement('li');
+    li.className = 'transfer transfer-done';
+    li.textContent =
+      `${from ? from.name : entry.from} paid ${to ? to.name : entry.to} ${formatRupees(entry.amountPaise)} (done)`;
+    listEl.appendChild(li);
+  }
+  for (const transfer of pending) {
     const from = members.find((m) => m.id === transfer.from);
     const to = members.find((m) => m.id === transfer.to);
     const li = document.createElement('li');
     li.className = 'transfer';
     li.textContent =
       `${from ? from.name : transfer.from} pays ${to ? to.name : transfer.to} ${formatRupees(transfer.amountPaise)}`;
+    // The button carries the transfer it settles, so the listener below holds no state of
+    // its own and a rebuild cannot leave it pointing at a row that is no longer there.
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'transfer-done-btn';
+    button.dataset.from = transfer.from;
+    button.dataset.to = transfer.to;
+    button.dataset.amount = String(transfer.amountPaise);
+    button.textContent = 'Mark done';
+    li.appendChild(button);
     listEl.appendChild(li);
   }
 }
@@ -251,7 +285,14 @@ async function loadBalancesAndSettlement(groupId, members) {
       api(`/api/groups/${groupId}/settlement`),
     ]);
     renderBalances(balancesList, members, balanceData.balances);
-    renderSettlement(settlementList, members, settlementData.settlement);
+    // `recorded` rides on the same response as the computed list, so the two halves of
+    // the panel are always read from one snapshot of the ledger.
+    renderSettlement(
+      settlementList,
+      members,
+      settlementData.settlement,
+      settlementData.recorded || [],
+    );
   } catch (err) {
     // One error line above the panels instead of failing the whole view. A group whose
     // stored expenses no longer add up is exactly when the user needs to see the expense
@@ -265,6 +306,7 @@ async function loadBalancesAndSettlement(groupId, members) {
 async function loadGroup(groupId) {
   const data = await api(`/api/groups/${groupId}/expenses`);
   document.getElementById('group-title').textContent = data.group.name;
+  currentMembers = data.group.members;
 
   // Populate payer dropdown and split checkboxes
   const payerSelect = document.getElementById('expense-payer');
@@ -488,6 +530,41 @@ for (const id of ['expense-desc', 'expense-amount']) {
     document.getElementById('expense-error').textContent = '';
   });
 }
+
+// Marking a transfer done. One listener for the whole list rather than one per button:
+// the list is rebuilt on every refresh, so per-button listeners would be discarded and
+// re-attached each time, and a listener left on a row that no longer exists is how a click
+// ends up posting a transfer the user is no longer looking at.
+document.getElementById('settlement-list').addEventListener('click', async (e) => {
+  const button = e.target.closest('.transfer-done-btn');
+  if (!button) return;
+
+  const errorDiv = document.getElementById('settlement-error');
+  errorDiv.textContent = '';
+  // AC-4's first line of defence: a disabled button stops firing click events at all, so
+  // the double-click never reaches here. The server's 409 is the second line, and covers
+  // the tabs and retries this one cannot see.
+  button.disabled = true;
+  button.textContent = 'Marking...';
+
+  try {
+    await api(`/api/groups/${currentGroupId}/settlements`, 'POST', {
+      from: button.dataset.from,
+      to: button.dataset.to,
+      amountPaise: Number(button.dataset.amount),
+    });
+    // Both panels are derived from the same ledger, so they are re-read together:
+    // refreshing one and not the other is how the panel ends up showing a transfer as done
+    // beside the balance it was supposed to have cleared.
+    await loadBalancesAndSettlement(currentGroupId, currentMembers);
+  } catch (err) {
+    // The list is not rebuilt on failure, so this button is still on screen: re-enable it
+    // rather than leave the transfer permanently unclickable over a request that failed.
+    errorDiv.textContent = err.message;
+    button.disabled = false;
+    button.textContent = 'Mark done';
+  }
+});
 
 // Back link
 document.getElementById('back-link').addEventListener('click', showCreateView);

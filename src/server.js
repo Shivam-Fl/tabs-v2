@@ -6,9 +6,11 @@ import {
   createGroup,
   addExpense,
   getExpenses,
+  recordSettlement,
   calculateBalances,
   calculateSettlement,
   InvalidInputError,
+  SettlementDuplicateError,
 } from './domain.js';
 import { createStore } from './store.js';
 import { splitEqual, splitByShares } from './money.js';
@@ -66,8 +68,8 @@ function errorResponse(res, code, message, statusCode = 400) {
 
 function parseRoute(urlPath) {
   const pathname = url.parse(urlPath).pathname;
-  // The three group sub-resources are matched together, in the order the group screen
-  // reads them. The order is not load-bearing — none of these patterns matches either of
+  // The group sub-resources are matched together, in the order the group screen reads
+  // them. The order is not load-bearing — none of these patterns matches either of
   // the others' paths — but a reader looking for "what is under /api/groups/:id" gets all
   // of it in one block instead of finding /expenses and wondering what else is down here.
   // /api/groups/:id/balances
@@ -79,6 +81,13 @@ function parseRoute(urlPath) {
   const settlementMatch = pathname.match(/^\/api\/groups\/([^/]+)\/settlement$/);
   if (settlementMatch) {
     return { resource: 'group_settlement', groupId: settlementMatch[1] };
+  }
+  // /api/groups/:id/settlements — the write path. Deliberately a different path from the
+  // singular one above rather than a POST on the same URL: one is a computed read, the
+  // other appends to the ledger, and a client should not be able to confuse them.
+  const settlementsMatch = pathname.match(/^\/api\/groups\/([^/]+)\/settlements$/);
+  if (settlementsMatch) {
+    return { resource: 'group_settlements', groupId: settlementsMatch[1] };
   }
   // /api/groups/:id/expenses
   const expenseMatch = pathname.match(/^\/api\/groups\/([^/]+)\/expenses$/);
@@ -203,7 +212,12 @@ async function handleRequest(req, res, store) {
     try {
       const balances = calculateBalances(group);
       return jsonResponse(res, 200, {
+        // `settlement` keeps its name and its meaning: the transfers still outstanding.
+        // `recorded` is the other half of the panel — what has already been done — and is
+        // read off the group rather than derived, because a done transfer is a fact about
+        // the past, not a conclusion from the current balances.
         settlement: calculateSettlement(balances, group.members),
+        recorded: group.settlements || [],
       });
     } catch (err) {
       // The same code as /balances on purpose. The settlement is derived from the same
@@ -214,6 +228,52 @@ async function handleRequest(req, res, store) {
   }
 
   if (route.resource === 'group_settlement') {
+    return errorResponse(res, 'METHOD_NOT_ALLOWED', 'Method not allowed', 405);
+  }
+
+  // POST /api/groups/:id/settlements
+  if (route.resource === 'group_settlements' && req.method === 'POST') {
+    const data = store.load();
+    const group = data[route.groupId];
+    if (!group) {
+      return errorResponse(res, 'GROUP_NOT_FOUND', 'Group not found', 404);
+    }
+    let body;
+    try {
+      body = await parseBody(req);
+    } catch {
+      return errorResponse(res, 'INVALID_JSON', 'Request body too large', 400);
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return errorResponse(res, 'INVALID_JSON', 'Invalid JSON', 400);
+    }
+    try {
+      const updatedGroup = recordSettlement(group, parsed);
+      // The same shape as the expense write: record, then hand back the entry that was
+      // appended. Nothing is derived here, so nothing can throw between the write and the
+      // response and leave the store holding an entry the client never saw.
+      const settlement = updatedGroup.settlements[updatedGroup.settlements.length - 1];
+      data[route.groupId] = updatedGroup;
+      store.save(data);
+      return jsonResponse(res, 201, { settlement });
+    } catch (err) {
+      if (err instanceof InvalidInputError) {
+        return errorResponse(res, err.code, err.message, 400);
+      }
+      // 409, not 400: the request was fine and the settlement is real, but this exact one
+      // is already on the ledger. The client shows the message and stops; the entry it
+      // tried to duplicate is untouched either way.
+      if (err instanceof SettlementDuplicateError) {
+        return errorResponse(res, err.code, err.message, 409);
+      }
+      return errorResponse(res, 'INTERNAL', err.message, 500);
+    }
+  }
+
+  if (route.resource === 'group_settlements') {
     return errorResponse(res, 'METHOD_NOT_ALLOWED', 'Method not allowed', 405);
   }
 
