@@ -1,3 +1,4 @@
+import http from 'node:http';
 import test from 'node:test';
 import assert from 'node:assert';
 import { start } from '../src/server.js';
@@ -772,6 +773,158 @@ test('the derived endpoints return 500 BALANCES_INVARIANT when the stored group 
   }
 });
 
+// POSTs the headers, then the body a moment later, so the handler has already been
+// entered and is parked on `await parseBody(req)` by the time the body lands.
+//
+// This is what makes the test below able to see the race at all. Two `fetch` calls in a
+// `Promise.all` do not: on loopback the first request's body is read and its handler has
+// left `parseBody` before the second connection's `request` event is even emitted, so the
+// two handlers never overlap and the test passes against the unfixed code. Measured at
+// 0/50 iterations caught that way, against 20/20 this way.
+function postAfterHeaders(path, body, baseUrl, delayMs = 50) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(path, baseUrl);
+    const payload = JSON.stringify(body);
+    const req = http.request(
+      {
+        hostname: target.hostname,
+        port: target.port,
+        path: target.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        let raw = '';
+        res.on('data', (chunk) => {
+          raw += chunk;
+        });
+        res.on('end', () => resolve({ status: res.statusCode, data: JSON.parse(raw) }));
+      },
+    );
+    req.on('error', reject);
+    req.flushHeaders();
+    setTimeout(() => req.end(payload), delayMs);
+  });
+}
+
+// The finding from the review of #7: this handler read the store *before*
+// `await parseBody(req)` and wrote it back after. Two requests therefore loaded the same
+// snapshot, each appended its expense to its own copy, and the second save dropped the
+// first — one expense gone, with a 201 for both. The load→modify→save span has to be
+// synchronous, so nothing can run between the read and the write.
+test('two overlapping POSTs to the same group both persist', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+
+    const [first, second] = await Promise.all([
+      postAfterHeaders(`/api/groups/${groupId}/expenses`, {
+        description: 'Hotel-1',
+        amountPaise: 600000,
+        payerId: 'Asha',
+        splitMemberIds: tripMembers(),
+      }, url),
+      postAfterHeaders(`/api/groups/${groupId}/expenses`, {
+        description: 'Dinner-2',
+        amountPaise: 450000,
+        payerId: 'Rahul',
+        splitMemberIds: tripMembers(),
+      }, url),
+    ]);
+    assert.strictEqual(first.status, 201);
+    assert.strictEqual(second.status, 201);
+
+    const { status, data } = await get(`/api/groups/${groupId}/expenses`, url);
+    assert.strictEqual(status, 200);
+    assert.deepStrictEqual(
+      data.expenses.map((e) => e.description).sort(),
+      ['Dinner-2', 'Hotel-1'],
+      'a concurrent expense POST overwrote the other',
+    );
+  } finally {
+    close();
+  }
+});
+
+// The other half of the same finding: keeping both writes is not enough if the ledger
+// they leave behind no longer adds up. The exact balances also prove *both* expenses
+// landed rather than one having been written twice.
+test('two overlapping expense POSTs still leave balances netting to zero', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+
+    await Promise.all([
+      postAfterHeaders(`/api/groups/${groupId}/expenses`, {
+        description: 'Hotel-1',
+        amountPaise: 600000,
+        payerId: 'Asha',
+        splitMemberIds: tripMembers(),
+      }, url),
+      postAfterHeaders(`/api/groups/${groupId}/expenses`, {
+        description: 'Dinner-2',
+        amountPaise: 450000,
+        payerId: 'Rahul',
+        splitMemberIds: tripMembers(),
+      }, url),
+    ]);
+
+    const { status, data } = await get(`/api/groups/${groupId}/balances`, url);
+    assert.strictEqual(status, 200);
+    // Asha fronts 600000 and owes 200000 + 150000; Rahul fronts 450000 and owes the same;
+    // Meera fronts nothing and owes 350000.
+    assert.deepStrictEqual(data.balances, [
+      { memberId: 'Asha', paise: 250000 },
+      { memberId: 'Rahul', paise: 100000 },
+      { memberId: 'Meera', paise: -350000 },
+    ]);
+    assert.strictEqual(data.balances.reduce((sum, b) => sum + b.paise, 0), 0);
+  } finally {
+    close();
+  }
+});
+
+// Making the load→modify→save span synchronous means the body has to be read and parsed
+// before the group is looked up, so a request that is both unparseable and aimed at an
+// unknown group now reports the body (400) rather than the group (404). That is the whole
+// of the precedence change: everything that parses still reaches the lookup, so the two
+// requests either code was written for are answered exactly as before.
+test('POST /api/groups/:id/expenses reads the body before it looks the group up', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const unparseable = await postRaw('/api/groups/nonexistent-id/expenses', '{"description":', url);
+    assert.strictEqual(unparseable.status, 400);
+    assert.strictEqual(unparseable.data.error.code, 'INVALID_JSON');
+
+    // `null` is valid JSON, so it still gets as far as the lookup and is answered by the
+    // group being missing. Moving this one to 400 as well would be a second behaviour
+    // change, and this pins that it was not made.
+    const nonObject = await postRaw('/api/groups/nonexistent-id/expenses', 'null', url);
+    assert.strictEqual(nonObject.status, 404);
+    assert.strictEqual(nonObject.data.error.code, 'GROUP_NOT_FOUND');
+
+    const unknownGroup = await post('/api/groups/nonexistent-id/expenses', {
+      description: 'Lunch',
+      amountPaise: 500,
+      payerId: 'Alice',
+      splitMemberIds: ['Alice'],
+    }, url);
+    assert.strictEqual(unknownGroup.status, 404);
+    assert.strictEqual(unknownGroup.data.error.code, 'GROUP_NOT_FOUND');
+
+    const { data } = await get('/api/groups', url);
+    assert.deepStrictEqual(data.groups, [], 'a rejected request wrote a group');
+  } finally {
+    close();
+  }
+});
+
 // ── POST /api/groups/:id/settlements: the write path (#5) ────────────────────
 //
 // The plural path is the write; the singular one above stays the read-only computed
@@ -905,6 +1058,76 @@ test('POST /api/groups/:id/settlements refuses a duplicate with 409 SETTLEMENT_D
     const after = await get(`/api/groups/${groupId}/settlement`, url);
     assert.strictEqual(after.status, 200);
     assert.strictEqual(after.data.recorded.length, 1);
+  } finally {
+    close();
+  }
+});
+
+// The same race as the expense write, on the handler #5 added beside it, which is why it
+// is tested the same way and with the same split-body helper: the store was read before
+// `await parseBody`, so two settlements arriving together both loaded a snapshot with
+// neither entry, and the second save dropped the first. One recorded, one gone, two 201s.
+test('two overlapping settlement POSTs both persist', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    await seedTripExpenses(groupId, url);
+
+    const [first, second] = await Promise.all([
+      postAfterHeaders(`/api/groups/${groupId}/settlements`, {
+        from: 'Meera',
+        to: 'Asha',
+        amountPaise: 200000,
+      }, url),
+      postAfterHeaders(`/api/groups/${groupId}/settlements`, {
+        from: 'Meera',
+        to: 'Asha',
+        amountPaise: 250000,
+      }, url),
+    ]);
+    assert.strictEqual(first.status, 201);
+    assert.strictEqual(second.status, 201);
+
+    const { status, data } = await get(`/api/groups/${groupId}/settlement`, url);
+    assert.strictEqual(status, 200);
+    assert.deepStrictEqual(
+      data.recorded.map((entry) => entry.amountPaise).sort((a, b) => a - b),
+      [200000, 250000],
+      'a concurrent settlement POST overwrote the other',
+    );
+    assert.strictEqual(store.load()[groupId].settlements.length, 2);
+  } finally {
+    close();
+  }
+});
+
+// The duplicate check reads `group.settlements` off the snapshot the handler loaded, so
+// the same read-before-await left it blind: two identical requests both saw an empty
+// ledger and both were told 201. The guard's whole purpose is the second one — a
+// double-click, a retry, a replayed request — so this pins that exactly one of a
+// simultaneous pair is refused, and that the ledger holds one entry rather than two.
+test('two overlapping duplicate settlement POSTs leave one entry and one 409', async () => {
+  const store = createStore({ memory: true });
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const groupId = await createTrip(url);
+    await seedTripExpenses(groupId, url);
+    const body = { from: 'Meera', to: 'Asha', amountPaise: 450000 };
+
+    const results = await Promise.all([
+      postAfterHeaders(`/api/groups/${groupId}/settlements`, body, url),
+      postAfterHeaders(`/api/groups/${groupId}/settlements`, body, url),
+    ]);
+
+    assert.deepStrictEqual(
+      results.map((r) => r.status).sort((a, b) => a - b),
+      [201, 409],
+      'the duplicate guard did not see the entry the other request was writing',
+    );
+    const refused = results.find((r) => r.status === 409);
+    assert.strictEqual(refused.data.error.code, 'SETTLEMENT_DUPLICATE');
+    assert.strictEqual(store.load()[groupId].settlements.length, 1);
   } finally {
     close();
   }
