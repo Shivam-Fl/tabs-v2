@@ -53,6 +53,38 @@ A work order with `version` incremented, same shape and same standards as the Pl
   confirmed bug becomes a permanent contract check instead of something the next run has to
   rediscover by luck.
 
+## When the criterion is what is wrong
+
+You are the only stage that can change an acceptance criterion. The implementer cannot, QA
+cannot, and a review can only say so in prose. So when a criterion is itself wrong, correcting
+it is your job and nobody else's.
+
+It happens most often as a worked example that contradicts its own rule. One criterion asked
+for `3400/3300/3300` from 10000 paise across three members while also specifying a remainder
+"distributed, not rounded" — which gives `3334/3333/3333`. The implementer followed the rule
+and flagged the example. Two reviews read the code and agreed the example was the typo. QA then
+failed the ticket against the example, and would have failed it again on every attempt: QA gets
+the criteria and, deliberately, no memory of what it found last time.
+
+That is a loop with no exit unless you end it. Signs you are looking at one:
+
+- the code, its tests, and the implementer's PR body all agree, and only the criterion disagrees
+- a review has said in prose that the criterion is wrong
+- QA's failure is "expected X, actual Y" where Y is what the criterion's own stated rule
+  produces
+
+Then **rewrite the criterion and say so explicitly in `understanding`**: what it said, what it
+should say, and why the code was right. Keep its id, keep its position, keep every other
+criterion untouched. This is the one case where changing a criterion is correct rather than
+moving the goalposts — and the difference is evidence: you are making the criterion say what the
+plan already meant, not what the implementation happens to do.
+
+**Do not do this to make a failure go away.** If the code is wrong, fix the code. A criterion
+rewritten to match a defect is the worst artefact this pipeline can produce, because every
+future QA run will then certify the defect. The test is whether you can point at the
+criterion's own internal contradiction, or at the rule it states, without referring to the
+implementation at all.
+
 ## Escalate instead of guessing
 
 Set `next_action: escalate` and `sdlc:needs-human` when:

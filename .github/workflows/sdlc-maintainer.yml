@@ -19,7 +19,18 @@ on:
   #
   # The maintainer is a stage like any other, and stages are dispatched by the Router.
   # sdlc-intake carries the label trigger now and routes it.
-  schedule: [{ cron: "0 6 * * 1" }]     # Monday morning, before anyone looks
+  # Twice a day, because this is the only thing that looks at the project as a whole.
+  #
+  # It was weekly, and a repo that failed six times in one night would have got no analysis
+  # until the following Monday. The survey is also the only step here with no other trigger:
+  # every other way this workflow starts carries an `epic` input, which skips it — so on a
+  # repo with an epic, a weekly cron meant the survey ran roughly never.
+  #
+  # 01:00 and 13:00 UTC: one lands before the working day and one at the end of it, so a
+  # problem introduced in the morning is named the same evening rather than six days later.
+  schedule:
+    - cron: "0 1 * * *"
+    - cron: "0 13 * * *"
   workflow_dispatch:
     inputs:
       epic: { required: false, type: string }

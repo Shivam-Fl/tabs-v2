@@ -54,6 +54,13 @@ try {
   await gh(['api', `repos/${repo}/pulls/${pr}/update-branch`, '-X', 'PUT']);
   setOutput('updated', 'true');
   process.stdout.write('branch updated; the diff now shows only this branch\'s own changes\n');
+  // The checkout happened before this step, so the working tree is still at the pre-update
+  // head. Server-side reads — `gh pr diff`, the PR's file list — are current; files on disk are
+  // one merge behind. Said out loud rather than reset: a hard reset here would fight whatever
+  // ref the workflow chose to check out, and every agent that judges a diff is told to read it
+  // from `gh pr diff` anyway.
+  process.stdout.write('::notice::the local checkout predates this update — read the diff with ' +
+    '`gh pr diff`, which is server-side and current\n');
 } catch (e) {
   // A conflict is a real finding and belongs to the implementer, not to a reviewer reading a
   // diff that cannot be trusted. Said out loud rather than swallowed, because a review that

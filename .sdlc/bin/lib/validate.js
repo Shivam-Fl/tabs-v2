@@ -35,7 +35,16 @@ function walk(schema, data, path, errors) {
     const want = schema.type;
     const ok = want === 'integer' ? Number.isInteger(data) : t === want;
     if (!ok) {
-      err(`expected ${want}, got ${t === 'number' && want === 'integer' ? 'non-integer number' : t}`);
+      // Show the VALUE, not just its type.
+      //
+      // "`confidence`: expected integer, got string" sent an issue to a human, and the
+      // work-order.json it came from lived only on the runner's ephemeral filesystem — so the
+      // agent dispatched to diagnose it could say what the type was and never what the value
+      // was. "got string \"high\"" is a fix; "got string" is an invitation to guess.
+      const shown = typeof data === 'string' || typeof data === 'number' || typeof data === 'boolean'
+        ? ` ${JSON.stringify(String(data).slice(0, 80))}`
+        : '';
+      err(`expected ${want}, got ${t === 'number' && want === 'integer' ? 'non-integer number' : t}${shown}`);
       return; // every other check assumes the type held
     }
   }
