@@ -63,8 +63,13 @@ switch (cmd) {
         // step in sdlc-qa reads none of its outputs, so reporting from the caller only ever
         // covered `/sdlc approve`. A CRASH is still ours: stop() does not run when the
         // process dies, so nothing else can say that nothing was judged.
-        const refused = /^not merging: /m.test(run.stdout);
-        if (!refused) {
+        //
+        // Keyed off the EXIT CODE now, not the prose. merge-pr exits 0 for every outcome it
+        // decided — merged, refused at a gate, sent back because the branch conflicts with its
+        // base — and non-zero only when it crashed. Matching "not merging: " covered one of
+        // those, so a genuine conflict, routed correctly to the implementer, was announced as
+        // "the merge step itself failed — the tool that judges them did not finish".
+        if (run.crashed) {
           const noise = /^\s*(at\s|node:internal|\^|\}|\{|Node\.js v|code:|killed:|signal:|cmd:|stdout:|stderr:|const err|\s*$)/;
           const cause = (run.stderr || run.stdout).split('\n')
             .map((l) => l.replace(/^Error: Command failed:.*$/, '').trim())
