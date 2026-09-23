@@ -43,7 +43,11 @@ Prefer these over anything derived from text or DOM position.
 | Element | Selector |
 |---|---|
 | Panel | `#settlement-panel` |
+| Error | `#settlement-error` (class `error`) |
 | List | `#settlement-list` (class `panel-list`) |
+| Pending transfer | `.transfer` (li with 'Mark done' button) |
+| Done transfer button | `.transfer-done-btn` (inside `.transfer`) |
+| Done transfer row | `.transfer-done` (class — opacity 0.6, line-through, CSS `::before` adds `✓`) |
 
 ## Expense list
 | Element | Selector |

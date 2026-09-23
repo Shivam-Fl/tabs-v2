@@ -12,9 +12,10 @@
 
 ## Server patterns
 - JSON API with explicit error responses: `{ error: { code: '...', message: '...' } }`.
-- Error codes: `INVALID_JSON`, `METHOD_NOT_ALLOWED`, `GROUP_NAME_TAKEN`, `BALANCES_INVARIANT`.
+- Error codes: `INVALID_JSON`, `METHOD_NOT_ALLOWED`, `GROUP_NAME_TAKEN`, `BALANCES_INVARIANT`, `SETTLEMENT_MEMBER_UNKNOWN`, `SETTLEMENT_SELF`, `SETTLEMENT_DUPLICATE`.
 - Body size limit: 64 KB (returns 400 `INVALID_JSON`).
 - Non-JSON primitives (`null`, `[]`, `"string"`, `123`) in POST bodies → 400 `INVALID_JSON`.
+- **Write-path ordering:** In any handler that reads the store, modifies it, and writes it back, `store.load()` must come *after* every `await` (typically `await parseBody(req)`). Placing it before an `await` lets two concurrent requests load the same snapshot and one write overwrites the other. Error precedence follows: body parsing happens before the group lookup, so a request with both bad JSON and a nonexistent group returns 400, not 404.
 
 ## Tests
 - `node --test test/` is `sdlc:verify`.
