@@ -16,8 +16,11 @@
   "work_order": null,
   "touch_paths": [],
   "acceptance": [],
-  "planned_route": [],
-  "on_complete": null,
+  "planned_route": [
+    "project",
+    "maintainer"
+  ],
+  "on_complete": "comment-only",
   "artifacts": {},
   "failure_history": [],
   "review_history": [],
@@ -39,9 +42,22 @@
       "at": "2026-09-25T17:29:20.509Z",
       "agent": "intake",
       "action": "-> planning"
+    },
+    {
+      "at": "2026-09-25T17:30:20.799Z",
+      "agent": "router",
+      "action": "route project -> maintainer (model, confidence 88)"
     }
   ],
   "resume_at": null,
   "stopped_at": null,
-  "dispatched_stage": "intake"
+  "dispatched_stage": "intake",
+  "flow_plan": {
+    "kind": "epic",
+    "confidence": 88,
+    "matched_rule": null,
+    "gates": {},
+    "councils": {},
+    "decided_at": "2026-09-25T17:30:20.798Z"
+  }
 }
