@@ -39,32 +39,32 @@ runtime:
     #   built to drive a browser and read what it sees, so it gets QA.
     # qwen3.6-plus — the predecessor of 3.7 and measurably behind it (60.58 vs 61.72
     #   composite). Used where a second, differently-wrong opinion is the point.
-    plan:               qwen3.7-plus
-    plan_proposer:      deepseek-v4.1-flash   # writes the first full plan against real code
-    plan_critic:        qwen3.6-plus          # a different family fails differently, which is
+    plan:               space-bunny-free
+    plan_proposer:      space-bunny-free   # writes the first full plan against real code
+    plan_critic:        space-bunny-free          # a different family fails differently, which is
                                               # the only reason a council beats one agent
-    plan_arbiter:       qwen3.7-plus          # judges the critique and sets confidence
-    plan_reviewer:      qwen3.7-plus          # the last gate before code is written
-    debug:              deepseek-v4.1-flash   # reproduces and reads the failing path
-    implement:          deepseek-v4.1-flash   # the most-run stage, on the best coder
-    review:             qwen3.7-plus
-    review_correctness: deepseek-v4.1-flash   # does it work — code reading
-    review_design:      qwen3.7-plus          # should it be written this way — judgement
-    qa:                 minimax-m3            # drives a live browser and reads screenshots
-    root_cause:         qwen3.7-plus          # decides whether the original diagnosis was wrong
-    triage:             qwen3.7-plus          # reads a whole failed run's log and decides what
+    plan_arbiter:       space-bunny-free          # judges the critique and sets confidence
+    plan_reviewer:      space-bunny-free          # the last gate before code is written
+    debug:              space-bunny-free   # reproduces and reads the failing path
+    implement:          space-bunny-free   # the most-run stage, on the best coder
+    review:             space-bunny-free
+    review_correctness: space-bunny-free   # does it work — code reading
+    review_design:      space-bunny-free          # should it be written this way — judgement
+    qa:                 space-bunny-free            # drives a live browser and reads screenshots
+    root_cause:         space-bunny-free          # decides whether the original diagnosis was wrong
+    triage:             space-bunny-free          # reads a whole failed run's log and decides what
                                               # the failure means. Its wrong answer spends
                                               # another agent's entire run, so it gets judgement
-    librarian:          qwen3.6-plus
-    release:            qwen3.6-plus
-    maintainer:         qwen3.7-plus          # holds the whole project; the widest context
+    librarian:          space-bunny-free
+    release:            space-bunny-free
+    maintainer:         space-bunny-free          # holds the whole project; the widest context
     # Decides the stack once, for the life of the repo. The one place to spend the most
     # capable model you have.
-    project:            qwen3.7-plus
+    project:            space-bunny-free
     # Decides WHICH STAGES a ticket needs, and only when the free rules decline. It runs on
     # every issue they miss, so this is the one step where model cost is a tax on the whole
     # backlog.
-    router:             qwen3.6-plus
+    router:             space-bunny-free
 
   # Turn limits. EMPTY MEANS NO LIMIT, which is the default and usually right: the action
   # validates the count after the run, so exceeding a cap discards completed work instead of
@@ -75,8 +75,8 @@ runtime:
 # A council costs roughly 3x the turns. Start single; switch the stage that actually
 # produces bad output.
 councils:
-  plan:   single           # single | council
-  review: single           # single | council
+  plan:   council           # single | council
+  review: council           # single | council
 
 # Where agent PRs are opened against, and what QA diffs them from. Empty = the repo's
 # default branch. Set this when the team integrates somewhere else — many repos keep
