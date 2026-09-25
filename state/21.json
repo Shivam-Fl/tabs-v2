@@ -49,8 +49,8 @@
       "action": "route project -> maintainer (model, confidence 88)"
     }
   ],
-  "resume_at": null,
-  "stopped_at": null,
+  "resume_at": "project",
+  "stopped_at": "project",
   "dispatched_stage": "intake",
   "flow_plan": {
     "kind": "epic",
