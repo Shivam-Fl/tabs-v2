@@ -261,7 +261,7 @@
       "action": "lock acquired"
     }
   ],
-  "resume_at": null,
+  "resume_at": "implement",
   "flow_plan": {
     "kind": "feature",
     "confidence": 82,
@@ -274,7 +274,7 @@
     },
     "decided_at": "2026-09-25T17:29:04.567Z"
   },
-  "stopped_at": null,
+  "stopped_at": "plan",
   "dispatched_stage": "plan",
   "validated_from": "plan",
   "validated_at": "2026-09-25T17:42:42.777Z",
