@@ -12,7 +12,6 @@
     "qa": 0
   },
   "attempt_run": null,
-  "halted": null,
   "pending": null,
   "work_order": null,
   "touch_paths": [],
@@ -31,5 +30,8 @@
       "agent": "intake",
       "action": "-> needs-human"
     }
-  ]
+  ],
+  "resume_at": null,
+  "stopped_at": null,
+  "dispatched_stage": "intake"
 }
