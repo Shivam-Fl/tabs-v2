@@ -47,8 +47,50 @@ function viaStdin(args, input) {
   };
 }
 
+// GitHub's own hard limits, met here because every title and body the pipeline posts comes
+// through this function. The artifacts behind them are uncapped by design, so a long one is
+// cut on the way out — never refused, and never a failed run. The whole text is not lost: a
+// work order lives on the ledger, and every agent's file is in the run's artifacts.
+export const TITLE_MAX = 256;
+export const BODY_MAX = 65536;
+
+/** A title that fits, cut at a word boundary with "…". */
+export function fitTitle(title) {
+  const t = String(title);
+  if (t.length <= TITLE_MAX) return t;
+  const cut = t.slice(0, TITLE_MAX - 1);
+  const space = cut.lastIndexOf(' ');
+  return (space > TITLE_MAX / 2 ? cut.slice(0, space) : cut).trimEnd() + '…';
+}
+
+/** A body that fits, keeping its head and its tail — where a verdict or a fenced block sits. */
+export function fitBody(body) {
+  const b = String(body);
+  if (b.length <= BODY_MAX) return b;
+  const marker = (n) => `\n\n[… ${n} characters cut: the full text is on the ledger / in the run's artifacts …]\n\n`;
+  // Sized with the longest count the marker could carry, so the real one never overflows.
+  const keep = BODY_MAX - marker(b.length).length;
+  const head = Math.ceil(keep / 2);
+  const tail = keep - head;
+  return b.slice(0, head) + marker(b.length - keep) + b.slice(b.length - tail);
+}
+
+function fitted({ args, input }) {
+  const t = args.indexOf('--title') + 1;
+  if (t > 0 && String(args[t]).length > TITLE_MAX) {
+    process.stderr.write(`sdlc: title cut from ${String(args[t]).length} characters to GitHub's ${TITLE_MAX}\n`);
+    args = args.with(t, fitTitle(args[t]));
+  }
+  const b = args.indexOf('--body-file') + 1;
+  if (b > 0 && args[b] === '-' && typeof input === 'string' && input.length > BODY_MAX) {
+    process.stderr.write(`sdlc: body cut from ${input.length} characters to GitHub's ${BODY_MAX}\n`);
+    input = fitBody(input);
+  }
+  return { args, input };
+}
+
 export function gh(argv, { input: stdin, ...opts } = {}) {
-  const { args, input } = viaStdin(argv, stdin);
+  const { args, input } = fitted(viaStdin(argv, stdin));
   return new Promise((resolve, reject) => {
     const child = spawn('gh', args, { stdio: ['pipe', 'pipe', 'pipe'], ...opts });
     let stdout = '';
@@ -82,15 +124,19 @@ export function setOutput(key, value) {
 }
 
 /**
- * js-yaml is imported LAZILY. Some scripts run before `npm ci` — ci-verify reads
- * `verify.install` from config to decide how to install in the first place — so a top-level
- * dependency import here is a bootstrap deadlock: the config that says how to install
- * cannot be read until after installing.
+ * js-yaml is the VENDORED copy beside this file, never the bare 'js-yaml'.
+ *
+ * The bare specifier resolved from the repo root, which is the product's node_modules, and
+ * every `npm ci` an implementer or QA agent ran there pruned it. QA passed, the merge step
+ * died with ERR_MODULE_NOT_FOUND, and the failure handler died the same way because it reads
+ * config through this same function. A relative path is one nothing in the product tree can
+ * delete. Still imported lazily: most scripts that load this module never read config, and
+ * need not parse a YAML library to say so.
  */
 export async function loadConfig(root = ROOT) {
   const path = join(root, '.sdlc', 'config.yml');
   if (!existsSync(path)) die('no .sdlc/config.yml — run `sdlc init` first');
-  const { load: parseYaml } = await import('js-yaml');
+  const { load: parseYaml } = await import('./js-yaml.mjs');
   return parseYaml(readFileSync(path, 'utf8')) ?? {};
 }
 
@@ -168,9 +214,88 @@ export function flags(argv = process.argv.slice(2)) {
 
 export const repo = () => process.env.GITHUB_REPOSITORY ?? die('GITHUB_REPOSITORY is not set');
 
+/**
+ * Has the owner switched the pipeline off with the SDLC_ENABLED repository variable?
+ *
+ * Only an explicit "false" counts. `${{ vars.SDLC_ENABLED }}` is the empty string on a repo
+ * that never set it, and a kill switch that fired on a missing variable would stop every
+ * install that never heard of it. The guard reads this, and so does everything that still runs
+ * after the guard has stopped a job — an `always()` step, a failure handler — because a stop
+ * that the next step starts work behind is not one.
+ */
+export const switchedOff = (env = process.env) => String(env.SDLC_ENABLED ?? '').trim().toLowerCase() === 'false';
+
+/** The events a workflow's `on:` names, in any of the three shapes YAML allows it. */
+export const triggersOf = (on) => (typeof on === 'string' ? [on] : Array.isArray(on) ? on : Object.keys(on ?? {}));
+
 /** Extract the first fenced json block from a markdown body. */
 export function extractJsonBlock(body) {
   const m = String(body ?? '').match(/```json\s*\n([\s\S]*?)\n```/);
   if (!m) return null;
   try { return JSON.parse(m[1]); } catch { return null; }
+}
+
+/** Every fenced json block in a markdown body that parses, in order. */
+export function jsonBlocks(body) {
+  const out = [];
+  for (const m of String(body ?? '').matchAll(/```json\s*\n([\s\S]*?)\n```/g)) {
+    try { out.push(JSON.parse(m[1])); } catch { /* prose that looks like a block is not one */ }
+  }
+  return out;
+}
+
+/**
+ * The LAST parsed block the predicate accepts, or null.
+ *
+ * The first block was taken, with exact shapes, so a review that quoted a package.json before
+ * its verdict read as no verdict, and a comment that quoted an old work order before the new
+ * one handed the implementer the old one. The decision an agent states is the last thing it
+ * writes; what comes before it is evidence.
+ */
+export function lastJsonBlock(body, predicate = () => true) {
+  const found = jsonBlocks(body).filter((o) => o && typeof o === 'object' && predicate(o));
+  return found.length ? found.at(-1) : null;
+}
+
+// --- whose text is an instruction -------------------------------------------
+//
+// SECURITY BOUNDARY, the same one lib/commands.js draws for `/sdlc` commands, drawn once for
+// every reader. On a public repository anyone can comment, and the scripts that looked for "the
+// newest comment carrying a work order", "the newest failure packet", "the newest review" or
+// "every rejection" took whatever matched from whoever wrote it — so an outsider could hand the
+// implementer a plan, the fixer a packet, or the plan gate a fifth rejection. Content never
+// grants authority; the author does.
+
+/** This repository's own Actions identity, in each of the spellings the APIs return. */
+export function isPipelineAuthor(login) {
+  return /^(github-actions(\[bot\])?|app\/github-actions)$/i.test(String(login ?? ''));
+}
+
+// Write access to the repo. An allowlisted name alone would survive a username being renamed
+// and reclaimed by someone else, so both must hold — and an association nobody reported is not
+// one of these.
+const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
+/** The pipeline, or an allowlisted person who can also write to this repository. */
+export function isTrustedAuthor({ login, association } = {}, cfg = {}) {
+  if (isPipelineAuthor(login)) return true;
+  const allowlist = (cfg?.allowlist ?? []).map((u) => String(u).toLowerCase()).filter((u) => u !== 'replace_me');
+  return allowlist.includes(String(login ?? '').toLowerCase()) && TRUSTED_ASSOCIATIONS.has(association);
+}
+
+/**
+ * The comments on an issue or PR whose author may instruct the pipeline, oldest first.
+ *
+ * @param {'issue'|'pr'} kind
+ * @param {{pipelineOnly?: boolean}} opts  pipelineOnly for artifacts only the pipeline writes
+ *        (work orders, failure packets, rejections), where no person's comment is a substitute
+ * @returns {Promise<{id: string, body: string, login: string, association: string, createdAt: string}[]>}
+ */
+export async function trustedComments(kind, number, cfg, { pipelineOnly = false } = {}) {
+  const { comments = [] } = await ghJson([kind, 'view', String(number), '--json', 'comments']);
+  return comments
+    .map((c) => ({ id: c.id, body: c.body ?? '', login: c.author?.login ?? '',
+      association: c.authorAssociation, createdAt: c.createdAt }))
+    .filter((c) => (pipelineOnly ? isPipelineAuthor(c.login) : isTrustedAuthor(c, cfg)))
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
 }

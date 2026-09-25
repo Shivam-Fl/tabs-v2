@@ -8,7 +8,14 @@
 
 const BLOCKING_AC = new Set(['fail', 'blocked', 'not_covered']);
 
-export function checkQaConsistency(r) {
+// The test id a criterion cites when CI, not the browser, is what proves it. Only a criterion
+// the work order marks `verify: "test"` may rest on it — checkAcCoverage holds that line.
+const CI = 'ci';
+
+// AC ids are written by two different agents, so "ac-3" and "AC-3 " are the same criterion.
+const norm = (id) => String(id ?? '').toUpperCase().replace(/\s+/g, '');
+
+export function checkQaConsistency(r, { openBugs = [] } = {}) {
   const errors = [];
   const bad = (m) => errors.push(m);
 
@@ -24,15 +31,23 @@ export function checkQaConsistency(r) {
     bugIds.add(b.id);
   }
 
-  // Dangling references in either direction.
+  // Dangling references in either direction. Except the retest case: a PASSING test may cite a
+  // bug from the previous round that retest[] accounts for — it is the case that proves the fix,
+  // and the bug is gone from bugs[] precisely because it is fixed. growth-os #16's QA passed with
+  // all three earlier bugs retested fixed, cited them on their retest cases, and was rejected as
+  // "references BUG-1, which is not in bugs[]" — an honest pass thrown away. A failing test
+  // still has to cite a bug filed in this report.
+  const retested = new Set((r.retest ?? []).map((x) => norm(x.bug_id)));
   for (const t of r.tests ?? []) {
-    if (t.bug_id && !bugIds.has(t.bug_id)) bad(`${t.id} references ${t.bug_id}, which is not in bugs[]`);
+    if (t.bug_id && !bugIds.has(t.bug_id) && !(t.status === 'pass' && retested.has(norm(t.bug_id)))) {
+      bad(`${t.id} references ${t.bug_id}, which is not in bugs[]`);
+    }
     if (t.status === 'blocked' && !t.blocked_reason) bad(`${t.id} is blocked but gives no blocked_reason`);
     if (t.status === 'fail' && !t.actual) bad(`${t.id} failed but does not say what actually happened`);
   }
   for (const ac of r.acceptance_rollup ?? []) {
     for (const id of ac.test_ids ?? []) {
-      if (!testIds.has(id)) bad(`${ac.id} references ${id}, which is not in tests[]`);
+      if (id !== CI && !testIds.has(id)) bad(`${ac.id} references ${id}, which is not in tests[]`);
     }
     if (ac.status === 'pass' && !(ac.test_ids ?? []).length) {
       bad(`${ac.id} is marked pass but cites no test that proves it`);
@@ -112,5 +127,65 @@ export function checkQaConsistency(r) {
     }
   }
 
+  // A bug QA filed as introduced last round has to be looked at again this round.
+  //
+  // QA has no memory by design, so each run started from the diff alone and a bug it had filed,
+  // and the implementer had "fixed", was simply never mentioned again — which reads as fixed. The
+  // open list comes off the ledger (post-qa-report writes it), not from the agent, and each
+  // entry needs a retest row saying what happened to it.
+  const unchecked = (openBugs ?? []).filter((b) => !retested.has(norm(b.id)));
+  if (unchecked.length) {
+    bad(`${unchecked.map((b) => b.id).join(', ')} ${unchecked.length === 1 ? 'was' : 'were'} filed as introduced by ` +
+        'this PR last round and the report has no retest entry for it — a bug not mentioned again reads as fixed');
+  }
+  for (const x of r.retest ?? []) {
+    if (x.test_id && !testIds.has(x.test_id)) bad(`retest of ${x.bug_id} references ${x.test_id}, which is not in tests[]`);
+    if (x.status === 'still_present' && r.verdict === 'pass') bad(`verdict is "pass" but the retest says ${x.bug_id} is still present`);
+  }
+
+  return errors.length ? { ok: false, errors } : { ok: true };
+}
+
+/** The work order's criteria that none of these AC ids names — what merge-pr re-checks. */
+export function missingCriteria(ids, workOrder) {
+  const seen = new Set((ids ?? []).map(norm));
+  return (workOrder?.acceptance ?? []).map((a) => norm(a.id)).filter((id) => !seen.has(id));
+}
+
+/**
+ * Did this QA run exercise every acceptance criterion of the work order it was handed?
+ *
+ * checkQaConsistency only checks the report against itself, so a rollup of AC-1..AC-4, all
+ * passing, was an honest "pass" on a work order with six criteria — the two nobody tested were
+ * simply never mentioned. The work order is the floor; this is what makes it one.
+ *
+ * @param {object} r          the QA report
+ * @param {object} workOrder  the work order QA was given (its `acceptance` array)
+ * @returns {{ok: true} | {ok: false, errors: string[]}}
+ */
+export function checkAcCoverage(r, workOrder) {
+  const errors = [];
+  const criteria = new Map((workOrder?.acceptance ?? []).map((a) => [norm(a.id), a]));
+  const rolled = new Map((r.acceptance_rollup ?? []).map((a) => [norm(a.id), a]));
+
+  const missing = missingCriteria([...rolled.keys()], workOrder);
+  if (missing.length) {
+    errors.push(`the work order's ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing from acceptance_rollup — ` +
+      'every criterion needs a verdict, and an unmentioned one is not a pass');
+  }
+  // Only an audit writes its own criteria, and an audit has no work order to compare with.
+  const extra = [...rolled.keys()].filter((id) => !criteria.has(id));
+  if (extra.length) {
+    errors.push(`${extra.join(', ')} ${extra.length === 1 ? 'is not a criterion' : 'are not criteria'} of this work order`);
+  }
+
+  for (const [id, a] of rolled) {
+    const c = criteria.get(id);
+    if (!c) continue;
+    if (r.verdict === 'pass' && a.status !== 'pass') errors.push(`verdict is "pass" but ${id} is ${a.status}`);
+    if ((a.test_ids ?? []).includes(CI) && c.verify !== 'test') {
+      errors.push(`${id} cites "ci" as its proof, but the work order has QA verify it in the running app`);
+    }
+  }
   return errors.length ? { ok: false, errors } : { ok: true };
 }

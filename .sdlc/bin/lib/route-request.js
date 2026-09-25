@@ -14,17 +14,42 @@
 // Pure. A granted detour changes what runs next on a live ticket, so it is testable without
 // a network.
 
-import { validateRoute, loadGraph } from './flow-graph.js';
+import { validateRoute, loadGraph, DEFAULT_ROUTE } from './flow-graph.js';
+import { transition } from './ledger.js';
+
+/**
+ * Where the asking stage stands on the route: the index of the stage it is, or stands in for.
+ *
+ * It was `route.indexOf(from)`, which is -1 for the askers never on a route by their own name:
+ * root-cause, and a debugger on a route that says `plan` (or a planner on one that says
+ * `debug`). From -1 every insertion was tried from the top, and route-request read a route
+ * without the asker on it as a new one and restarted the ticket at its first stage — a fresh
+ * planner overwrote the revision root-cause had just recorded, without the QA evidence.
+ *
+ * root-cause hands straight to `implement` (nextStage), so it stands where implement does: a
+ * stage placed after it runs after the implementer. `debug` and `plan` fill the same slot.
+ */
+export function slotOf(route, from) {
+  if (from === 'root-cause') return route.indexOf('implement');
+  const i = route.indexOf(from);
+  if (i !== -1 || (from !== 'debug' && from !== 'plan')) return i;
+  return route.indexOf(from === 'debug' ? 'plan' : 'debug');
+}
 
 /**
  * @param {{type: string, stage: string, reason: string}} request
  * @param {{route: string[], from: string, attempts?: number, maxAttempts?: number,
- *          granted_already?: number, graph?: object}} ctx
- * @returns {{granted: boolean, route?: string[], reason: string, escalate?: boolean}}
+ *          granted_already?: number, hasPr?: boolean, graph?: object}} ctx
+ * @returns {{granted: boolean, route?: string[], reason: string, escalate?: boolean,
+ *            replaced?: true, rewinds?: string}}  `replaced`: the route was swapped for a new
+ *          one; `rewinds`: the stage went in before the asker and has to be started now
  */
 export function grantRouteRequest(request, ctx = {}) {
   const graph = ctx.graph ?? loadGraph();
-  const route = Array.isArray(ctx.route) ? [...ctx.route] : [];
+  // No route of its own is the default chain, and that is what a request is placed on. Against
+  // an empty list every insertion was the stage alone — ["review"], with no PR before it — so
+  // every request on the default chain was refused for a reason that was not the reason.
+  const route = Array.isArray(ctx.route) && ctx.route.length ? [...ctx.route] : [...DEFAULT_ROUTE];
   const from = ctx.from;
 
   if (!request || typeof request !== 'object') {
@@ -61,9 +86,22 @@ export function grantRouteRequest(request, ctx = {}) {
   // the Router was shown, and the honest answers are both outside its own route: either this
   // is an epic and the maintainer splits it, or a person decides.
   if (type === 'scope_changed') {
+    // Not once a pull request exists, and never from QA. Granted from QA, the route became
+    // ["maintainer"], its dispatch was an illegal qa -> planning move that only warned — the
+    // ledger stayed at qa while the labels said planning — and the PR built for the whole
+    // ticket was never merged or closed. What happens to that PR is a person's call; and QA's
+    // state has no way back to planning even on an audit, which has no PR.
+    if (stage === 'maintainer' && (ctx.hasPr || from === 'qa')) {
+      return {
+        granted: false, escalate: true,
+        reason: 'the ticket may be several tickets, and it is past planning — splitting it now means ' +
+                'deciding what happens to the work already built for it, which is a person\'s call',
+      };
+    }
     if (stage === 'maintainer') {
       return {
         granted: true,
+        replaced: true,
         route: ['maintainer'],
         reason: 'the ticket turned out to be larger than one work order, so the rest of the route is ' +
                 'replaced by a split — each piece is then routed on its own',
@@ -88,8 +126,13 @@ export function grantRouteRequest(request, ctx = {}) {
       reason: `"${stage}" is not something a route places — it runs when the pipeline says it runs`,
     };
   }
-  if (route.includes(stage) && route.indexOf(stage) > route.indexOf(from)) {
-    return { granted: false, reason: `"${stage}" is already coming up later on this route` };
+  const at = slotOf(route, from);
+  // Earlier on the route too: a second copy of a stage that has run is a loop, not a detour — and
+  // with placement before the asker below, it would otherwise be granted.
+  if (route.includes(stage)) {
+    return { granted: false, reason: route.indexOf(stage) > at
+      ? `"${stage}" is already coming up later on this route`
+      : `"${stage}" is already on this route and has run — a second copy is a loop, not a detour` };
   }
 
   // Insert it as EARLY as the graph allows, at or after the asking stage.
@@ -98,30 +141,45 @@ export function grantRouteRequest(request, ctx = {}) {
   // that dropped the review asks for one, and `["plan","review","implement","qa"]` puts a
   // reviewer in front of a pull request that does not exist yet. The stage has a position the
   // graph already implies; the request says it belongs on the route, not where.
-  const at = route.indexOf(from);
-  const start = at === -1 ? 0 : at + 1;
   let next = null;
   let lastError = null;
-
-  for (let i = start; i <= route.length; i++) {
+  const legalAt = (i) => {
     const candidate = [...route.slice(0, i), stage, ...route.slice(i)];
     const legal = validateRoute(candidate, graph);
-    if (legal.ok) { next = candidate; break; }
-    lastError ??= legal.errors[0];
+    if (!legal.ok) lastError ??= legal.errors[0];
+    return legal.ok ? candidate : null;
+  };
+
+  for (let i = at + 1; !next && i <= route.length; i++) next = legalAt(i);
+
+  // Nothing may follow QA, so QA — the one agent that has watched the change run — asking for
+  // the review its route dropped could never be granted: the request was refused, nothing
+  // escalated, and the PR merged in the same run. When nothing after the asker is legal, the
+  // stage goes in as LATE as the graph allows before it, and runs now; the route carries on from
+  // it, which brings the asker round again. Only a stage the ledger can move to from where the
+  // asker stands: QA's state has no way back to planning, so a plan or project put before QA
+  // would be a dispatch whose claim the ledger refuses while its label moves.
+  const here = graph.stages[from]?.state;
+  const startable = !here || transition({ state: here, history: [] }, graph.stages[stage].state).ok;
+  let rewinds = null;
+  for (let i = at; !next && startable && i >= 0; i--) {
+    next = legalAt(i);
+    if (next) rewinds = stage;
   }
 
   if (!next) {
     return {
       granted: false,
-      reason: `"${stage}" cannot go anywhere after "${from}" on this route: ${lastError}`,
+      reason: `"${stage}" cannot go anywhere on this route around "${from}": ${lastError}`,
     };
   }
 
   return {
     granted: true,
     route: next,
-    reason: `"${stage}" added to the route — the agent that asked had read the code, and the route ` +
-            'was decided before anyone had',
+    ...(rewinds ? { rewinds } : {}),
+    reason: `"${stage}" added to the route${rewinds ? ` before "${from}", starting now` : ''} — the agent ` +
+            'that asked had read the code, and the route was decided before anyone had',
   };
 }
 

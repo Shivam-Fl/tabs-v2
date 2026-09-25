@@ -72,24 +72,30 @@ export async function readLedger(repo, issue) {
 /**
  * Compare-and-swap write. Pass the sha from readLedger; a mismatch means someone else wrote
  * first and this call throws rather than overwriting their update.
+ *
+ * The body goes on stdin. It went as `-f content=<base64>`, one argv entry, and Linux caps one
+ * at 131,072 bytes: a ledger carrying a work order, its validated and approved stashes and a
+ * rejected artifact passes that, and from then on every write threw E2BIG — not a 409, so never
+ * retried — and the lock, the attempt, every transition and recordFailure all failed with it.
  */
 export async function writeLedger(repo, issue, ledger, sha, message) {
   const content = Buffer.from(JSON.stringify(ledger, null, 2) + '\n').toString('base64');
-  const args = [
-    'api', `repos/${repo}/contents/${pathFor(issue)}`, '-X', 'PUT',
-    '-f', `message=${message ?? `ledger: issue #${issue} -> ${ledger.state}`}`,
-    '-f', `content=${content}`,
-    '-f', `branch=${STATE_BRANCH}`,
-  ];
-  if (sha) args.push('-f', `sha=${sha}`);
-  return JSON.parse(await gh(args));
+  const body = { message: message ?? `ledger: issue #${issue} -> ${ledger.state}`, content, branch: STATE_BRANCH };
+  if (sha) body.sha = sha;
+  return JSON.parse(await gh(['api', `repos/${repo}/contents/${pathFor(issue)}`, '-X', 'PUT', '--input', '-'],
+    { input: JSON.stringify(body) }));
 }
 
 /**
- * Read, mutate, write — retrying on a lost race. `mutate` must be pure and safe to re-run,
- * because it will be called again with fresh state if someone else wrote in between.
- */
-/**
+ * Read, mutate, write — retrying on a lost race. `mutate` must be safe to re-run, because it
+ * will be called again with fresh state if someone else wrote in between.
+ *
+ * `mutate` returns the ledger to write, or `null` to write nothing. Returning NOTHING means it
+ * edited the ledger it was handed, and that edit is written. It used to mean "skip": six
+ * callers wrote `(l) => { l.retry_after = … }`, every one of them was silently discarded, and
+ * the one that mattered most was the outage cooldown — the issue parked at needs-human with
+ * no `retry_after`, so the watchdog had nothing to resume and it went quiet forever.
+ *
  * @param {{attempts?: number}} opts
  *
  * Eight attempts with JITTERED backoff, not four with fixed.
@@ -110,7 +116,8 @@ export async function updateLedger(repo, issue, mutate, { attempts = 8 } = {}) {
   let lastError;
   for (let i = 0; i < attempts; i++) {
     const { ledger, sha } = await readLedger(repo, issue);
-    const next = await mutate(ledger);
+    const returned = await mutate(ledger);
+    const next = returned === undefined ? ledger : returned;
     if (next === null || next === undefined) return { skipped: true, ledger };
     try {
       await writeLedger(repo, issue, next, sha);
@@ -128,13 +135,24 @@ export async function updateLedger(repo, issue, mutate, { attempts = 8 } = {}) {
 
 export async function listLedgers(repo) {
   try {
-    const raw = await gh(['api', `repos/${repo}/contents/state?ref=${STATE_BRANCH}`]);
-    return JSON.parse(raw)
+    let entries = JSON.parse(await gh(['api', `repos/${repo}/contents/state?ref=${STATE_BRANCH}`]));
+    // The contents API returns at most 1,000 entries for a directory and says nothing when it
+    // stops, so on a large project the ledgers that sort last dropped out of the collisions
+    // check and every sweep. The git tree has no such cap, and says when it was truncated.
+    if (entries.length >= 1000) {
+      const tree = JSON.parse(await gh(['api', `repos/${repo}/git/trees/${STATE_BRANCH}:state`]));
+      if (tree.truncated) throw new Error(`the state/ tree on ${STATE_BRANCH} is too large to list in one call`);
+      entries = tree.tree.filter((e) => e.type === 'blob').map((e) => ({ name: e.path }));
+    }
+    return entries
       .filter((f) => f.name.endsWith('.json'))
       .map((f) => Number(f.name.replace('.json', '')))
       .filter(Number.isInteger);
-  } catch {
-    return [];
+  } catch (e) {
+    // Only a missing state branch is "no ledgers". Anything else answered [] too, which every
+    // caller reads as "nothing is in flight": no collisions, nothing to sweep or reconcile.
+    if (/404|Not Found/.test(String(e.stderr ?? e.message))) return [];
+    throw e;
   }
 }
 

@@ -42,19 +42,26 @@ export async function advance(issue, state, { agent = 'system', alsoRemove = [] 
     '--issue', String(issue), '--to', state, '--agent', agent])
     .catch((e) => {
       moved = false;
+      const why = String(e.stderr || e.message).trim().split('\n').pop();
+
+      // A person said stop. That is not drift to warn about and label over: a stage that keeps
+      // going here keeps working on an issue someone halted, and one that moves the label
+      // announces a stage nobody is allowed to run. So it is fatal for EVERY state, and the
+      // labels stay exactly as the stop left them.
+      if (/(^|: )halted by @/.test(why)) {
+        throw new Error(`issue #${issue} is ${why.replace(/^.*?(halted by @)/, '$1')} — not moving it to "${state}"`);
+      }
+
       // Loud, because this is the failure that used to be invisible. Not fatal: the label is
       // what a human reads, and refusing to update it as well would hide the drift further.
-      process.stdout.write(
-        `::warning::issue #${issue}: ledger did not move to ${state} — ` +
-        `${String(e.stderr || e.message).trim().split('\n').pop()}\n`);
+      process.stdout.write(`::warning::issue #${issue}: ledger did not move to ${state} — ${why}\n`);
 
       // An outcome that could not be recorded has not happened. Stop before the label says it
       // did: a green label over a ledger that never moved is worse than a failed step, because
       // the failed step is visible and the label is believed.
       if (OUTCOMES.has(state)) {
         throw new Error(
-          `could not record "${state}" on the ledger for issue #${issue}: ` +
-          `${String(e.stderr || e.message).trim().split('\n').pop()}\n` +
+          `could not record "${state}" on the ledger for issue #${issue}: ${why}\n` +
           'This is a result, not a stage announcement — the label is deliberately left alone ' +
           'rather than claiming something the ledger does not hold.');
       }
@@ -146,10 +153,22 @@ export async function advance(issue, state, { agent = 'system', alsoRemove = [] 
   // `blocked` is deliberately absent. An issue moving TO blocked is being parked on a
   // dependency by intake, which happens in bursts during a fan-out, and each one would
   // dispatch a sweep that finds the same thing.
+  //
+  // Debounced. A fan-out parks or merges issues in bursts, and each one dispatched a sweep: the
+  // concurrency group ran them one at a time, and every dispatch was still a run created, queued
+  // and cancelled. A sweep that has not started yet will see this slot, so there is no need for
+  // another. One in progress is not enough — it may already be past the top-up that would start
+  // the next issue, which is the wait this dispatch exists to remove.
   if (['needs-human', 'budget-exceeded', 'done', 'merged'].includes(state)) {
-    await exec('gh', ['workflow', 'run', 'sdlc-watchdog.yml'])
-      .then(() => process.stdout.write(`a slot freed at #${issue} — asked the watchdog to look\n`))
-      .catch(() => { /* no actions: write here, or no such workflow; the timer still covers it */ });
+    const queued = await exec('gh', ['run', 'list', '--workflow', 'sdlc-watchdog.yml', '--limit', '10', '--json', 'status'])
+      .then(({ stdout }) => JSON.parse(stdout).some((r) => !['in_progress', 'completed'].includes(r.status)))
+      .catch(() => false);
+    if (queued) process.stdout.write(`a slot freed at #${issue} — a watchdog sweep is already queued\n`);
+    else {
+      await exec('gh', ['workflow', 'run', 'sdlc-watchdog.yml'])
+        .then(() => process.stdout.write(`a slot freed at #${issue} — asked the watchdog to look\n`))
+        .catch(() => { /* no actions: write here, or no such workflow; the timer still covers it */ });
+    }
   }
 
   return moved;

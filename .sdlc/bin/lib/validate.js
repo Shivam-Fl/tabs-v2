@@ -6,9 +6,11 @@
 // actually checked, and this sits on the trust boundary between agents.
 
 const ANNOTATIONS = new Set(['$id', '$schema', 'title', 'description', 'examples', 'default']);
+// No maxLength and no maxItems: an artifact is never refused for how much it says. A cap that
+// creeps back into a schema is refused here as unsupported, and by a test before it ships.
 const KEYWORDS = new Set([
   'type', 'required', 'additionalProperties', 'properties', 'items',
-  'minItems', 'maxItems', 'enum', 'pattern', 'minLength', 'maxLength',
+  'minItems', 'enum', 'pattern', 'minLength',
   'minimum', 'maximum',
 ]);
 
@@ -32,8 +34,11 @@ function walk(schema, data, path, errors) {
   const err = (message) => errors.push({ path: path || '(root)', message });
 
   if (schema.type !== undefined) {
-    const want = schema.type;
-    const ok = want === 'integer' ? Number.isInteger(data) : t === want;
+    // One type, or a list of them: `["string", "null"]` is a field that may say "none" out loud
+    // rather than by being absent, which a reader cannot tell apart from "not known".
+    const wants = [].concat(schema.type);
+    const want = wants.join(' or ');
+    const ok = wants.some((w) => (w === 'integer' ? Number.isInteger(data) : t === w));
     if (!ok) {
       // Show the VALUE, not just its type.
       //
@@ -44,7 +49,7 @@ function walk(schema, data, path, errors) {
       const shown = typeof data === 'string' || typeof data === 'number' || typeof data === 'boolean'
         ? ` ${JSON.stringify(String(data).slice(0, 80))}`
         : '';
-      err(`expected ${want}, got ${t === 'number' && want === 'integer' ? 'non-integer number' : t}${shown}`);
+      err(`expected ${want}, got ${t === 'number' && wants.includes('integer') ? 'non-integer number' : t}${shown}`);
       return; // every other check assumes the type held
     }
   }
@@ -56,9 +61,6 @@ function walk(schema, data, path, errors) {
   if (t === 'string') {
     if (schema.minLength !== undefined && data.length < schema.minLength) {
       err(`shorter than minLength ${schema.minLength} (got ${data.length})`);
-    }
-    if (schema.maxLength !== undefined && data.length > schema.maxLength) {
-      err(`longer than maxLength ${schema.maxLength} (got ${data.length})`);
     }
     if (schema.pattern !== undefined && !new RegExp(schema.pattern).test(data)) {
       err(`does not match pattern ${schema.pattern}`);
@@ -73,9 +75,6 @@ function walk(schema, data, path, errors) {
   if (t === 'array') {
     if (schema.minItems !== undefined && data.length < schema.minItems) {
       err(`needs at least ${schema.minItems} item(s), got ${data.length}`);
-    }
-    if (schema.maxItems !== undefined && data.length > schema.maxItems) {
-      err(`allows at most ${schema.maxItems} item(s), got ${data.length}`);
     }
     if (schema.items !== undefined) {
       data.forEach((item, i) => walk(schema.items, item, `${path}[${i}]`, errors));

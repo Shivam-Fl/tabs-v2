@@ -144,7 +144,7 @@ export function detect(repo) {
     };
     confidence.env = 'declared';
     notes.push('sdlc:serve is declared, so QA boots the app through it rather than a guessed command.');
-    return { stack, framework, verify, verifyMode: (repo.workflows ?? []).filter((w) => !w.startsWith('sdlc-') && w !== 'ci-verify.yml').length ? 'existing' : 'own', existingWorkflows: [], env: declaredEnv, confidence, notes, size: files.size };
+    return { stack, framework, verify, verifyMode: 'own', existingWorkflows: [], env: declaredEnv, confidence, notes, size: files.size };
   }
 
   const env = isLibrary && !hasPreviewHost && !framework
@@ -170,7 +170,7 @@ export function detect(repo) {
     confidence.env = 'library';
   }
   if (env.mode === 'preview') {
-    notes.push('preview mode assumed — QA waits for a deployment_status event. If this repo has no per-PR preview deploys, switch env.mode to compose.');
+    notes.push('preview mode assumed — QA waits (env.deploy_wait_minutes, default 20) for a deployment of the PR head commit. If this repo has no per-PR preview deploys, switch env.mode to compose.');
     confidence.env = 'guessed';
   }
   if (env.mode === 'compose' && !env.boot) {
@@ -191,17 +191,20 @@ export function detect(repo) {
 
   // --- existing CI -----------------------------------------------------------
   const existing = (repo.workflows ?? []).filter((w) => !w.startsWith('sdlc-') && w !== 'ci-verify.yml');
-  // A repo with its own CI should keep using it. Running a second, weaker set of checks
-  // beside it burns minutes and gates on less than the team actually trusts.
-  const verifyMode = existing.length ? 'existing' : 'own';
+  // "own", even when the repo has CI of its own. The pipeline pushes as github-actions[bot],
+  // and GitHub starts no pull_request run for a push made with that token — so the repo's CI
+  // never reports on the pipeline's PRs, and "existing" waited on checks that could not come.
+  // Any file in .github/workflows used to flip this, a deploy.yml included.
+  const verifyMode = 'own';
   if (existing.length) {
     notes.push(
       `this repo already has ${existing.length} workflow(s) (${existing.slice(0, 3).join(', ')}` +
-      `${existing.length > 3 ? ', …' : ''}), so verify.mode is set to "existing" — the pipeline ` +
-      'waits for those checks rather than duplicating them. Set verify.required_checks to the ' +
-      'job names that must pass, or leave it empty to wait for all of them.',
+      `${existing.length > 3 ? ', …' : ''}). verify.mode stays "own": GitHub starts no pull_request ` +
+      "run for the pipeline's bot pushes, so that CI would never report on its PRs. Use " +
+      '"existing" only for checks from a workflow that also runs on workflow_dispatch and posts ' +
+      'a commit status, named in verify.required_checks — doctor checks that.',
     );
-    confidence.verify_mode = 'from existing CI';
+    confidence.verify_mode = 'existing CI seen, not relied on';
   }
 
   for (const k of Object.keys(verify)) {
@@ -224,33 +227,67 @@ function previewHostsFor({ files, framework }) {
 }
 
 /**
+ * Reserved in every repo, whatever config says. The guards apply this list UNION the config's
+ * forbidden_paths: config can add a path, never remove one. It used to be written into config
+ * at install and read back from there alone, so `forbidden_paths: []` — one careless edit —
+ * reserved nothing, and an agent PR editing .sdlc/bin could merge unattended.
+ *
+ * The pipeline must not be able to rewrite its own rules — and that means all of them, not
+ * just the workflows. An agent that can edit .sdlc/agents/qa.md weakens the adversary testing
+ * its work; one that can edit .sdlc/bin/ disables the guards; one that can edit
+ * .sdlc/schemas/ loosens the validation of its own output.
+ */
+export const RESERVED = [
+  '.github/**',
+  '.sdlc/config.yml',
+  '.sdlc/agents/**',
+  '.sdlc/bin/**',
+  '.sdlc/schemas/**',
+  // The stage graph. An agent that could edit this could add an edge that skips the gate,
+  // or place a stage the Router is not allowed to place — the whole point of keeping the
+  // route in data is lost if the thing being routed can rewrite it.
+  '.sdlc/flow-graph.json',
+  '.sdlc/templates/**',
+  'bin/sdlc',
+  '**/*.env*',
+  // Instructions every later agent run reads before its prompt. A PR that adds one steers
+  // every agent after it, reviewer and QA included, from a file nobody reviews as a rule.
+  '**/CLAUDE.md',
+  '.claude/**',
+  '**/AGENTS.md',
+  // Registry and install-script settings: one line here swaps the package source every
+  // later `npm ci` trusts.
+  '**/.npmrc',
+];
+
+/**
+ * What the owner approved: the spec and the architecture. Only the project planner's branch
+ * (sdlc/project-*) may change them — that PR always waits for a human. Anywhere else an
+ * auto-merged ticket PR could rewrite the documents it is judged against.
+ */
+export const PROTECTED_DOCS = [
+  'docs/spec/**',
+  'docs/prd.md',
+  'docs/trd.md',
+  'docs/ui.md',
+  '.sdlc/memory/project.md',
+  '.sdlc/memory/project-brief.json',
+  '.sdlc/memory/spec-index.json',
+  '.sdlc/memory/decisions/**',
+];
+
+/**
  * Paths no agent should touch, on top of the framework defaults. Derived from what the repo
  * actually contains rather than a fixed list, because "infra/" means nothing in a repo that
  * keeps its terraform in "deploy/".
+ *
+ * .sdlc/memory/ is deliberately NOT here: the Librarian's whole job is writing there, through a
+ * reviewed PR, so the guards reserve it per branch (lib/guards.js reservedRules) rather than
+ * through config.
  */
 export function forbiddenFor(repo) {
   const files = repo.files ?? [];
-  // The pipeline must not be able to rewrite its own rules — and that means all of them,
-  // not just the workflows. An agent that can edit .sdlc/agents/qa.md weakens the adversary
-  // testing its work; one that can edit .sdlc/bin/ disables the kill switch; one that can
-  // edit .sdlc/schemas/ loosens the validation of its own output.
-  //
-  // .sdlc/memory/ is deliberately NOT reserved: the Librarian's whole job is writing there,
-  // and it does so through a reviewed pull request.
-  const base = [
-    '.github/**',
-    '.sdlc/config.yml',
-    '.sdlc/agents/**',
-    '.sdlc/bin/**',
-    '.sdlc/schemas/**',
-    // The stage graph. An agent that could edit this could add an edge that skips the gate,
-    // or place a stage the Router is not allowed to place — the whole point of keeping the
-    // route in data is lost if the thing being routed can rewrite it.
-    '.sdlc/flow-graph.json',
-    '.sdlc/templates/**',
-    'bin/sdlc',
-    '**/*.env*',
-  ];
+  const base = RESERVED;
 
   // Matched ANYWHERE in the path, not just at the root. A monorepo keeps its migrations at
   // apps/api/prisma/migrations/, and anchoring to the start silently reserves nothing —

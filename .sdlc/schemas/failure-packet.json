@@ -21,9 +21,18 @@
       "type": "integer",
       "minimum": 1
     },
+    "head": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{40,64}$",
+      "description": "The sdlc/issue-<n> branch head the failure happened on; null when the branch did not exist, absent when it could not be read. The packet is handed over only while the branch still stands there, so a rework of newer code is never told to fix an older error, and one whose head is unknown is never handed over."
+    },
     "stage": {
       "type": "string",
       "enum": [
+        "intake",
         "plan",
         "implement",
         "ci",
@@ -67,13 +76,11 @@
     "raw_excerpt": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 12000,
       "description": "The actual compiler/test/runner output. NOT a summary \u2014 the summary is what failed to be enough last time."
     },
     "digest": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 2000,
       "description": "One to three lines a human reads first."
     },
     "decision": {
@@ -86,8 +93,7 @@
       ]
     },
     "decision_reason": {
-      "type": "string",
-      "maxLength": 1000
+      "type": "string"
     },
     "context": {
       "type": "object",
@@ -99,29 +105,72 @@
         },
         "diff_ref": {
           "type": "string",
-          "maxLength": 200,
           "description": "Commit sha or branch the failure was produced from."
         },
         "failed_checks": {
           "type": "array",
-          "maxItems": 30,
           "items": {
-            "type": "string",
-            "maxLength": 200
+            "type": "string"
           }
         },
         "run_url": {
-          "type": "string",
-          "maxLength": 500
+          "type": "string"
         },
         "prior_signatures": {
           "type": "array",
-          "maxItems": 20,
           "items": {
-            "type": "string",
-            "maxLength": 200
+            "type": "string"
           },
           "description": "What has already failed on this issue, newest last, so a pattern is visible without reading every run."
+        }
+      }
+    },
+    "triage": {
+      "type": "object",
+      "description": "The failure-triage agent's reading of this failure, added by apply-triage after the packet was built.",
+      "required": [
+        "verdict",
+        "diagnosis",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "rerun",
+            "resume",
+            "repair",
+            "replan",
+            "wait",
+            "escalate"
+          ]
+        },
+        "diagnosis": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "framework_defect": {
+          "type": "object",
+          "required": [
+            "file",
+            "what",
+            "fix"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "what": {
+              "type": "string"
+            },
+            "fix": {
+              "type": "string"
+            }
+          }
         }
       }
     }

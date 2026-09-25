@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Start CI on the memory pull request the Librarian just opened.
+// Start CI on the memory pull request this run just opened.
 //
 // That PR is opened by the pipeline's own token, so GitHub never starts its `pull_request`
 // workflows — the runs exist, hold, and report `failure` with zero jobs and no check. The pull
@@ -15,18 +15,26 @@
 // and this only makes that PR tell the truth about itself before a person reads it.
 import { gh, ghJson } from './lib/actions.js';
 
-const prs = await ghJson(['pr', 'list', '--state', 'open', '--json', 'number,headRefName'])
-  .catch(() => []);
-const mine = prs.filter((p) => p.headRefName.startsWith('memory/'));
-
-if (!mine.length) {
-  process.stdout.write('no open memory pull request — nothing to verify\n');
+// Only the PR this run opened, named by the step that opened it. This used to pick it out of the
+// open PRs by look — a memory/ branch, this repository, the pipeline's account, opened in the
+// last two hours — and a look is not an identity: a branch name is anyone's to push from a fork,
+// and every other memory PR in that window passed too. The run that pushed the branch knows which
+// PR it is, so it says, and nothing here reads the list at all.
+const pr = process.env.PR;
+const branch = process.env.BRANCH;
+if (!pr || !branch) {
+  process.stdout.write('no memory pull request from this run — nothing to verify\n');
   process.exit(0);
 }
 
-for (const pr of mine) {
-  await gh(['workflow', 'run', 'ci-verify.yml', '-f', `pr=${pr.number}`])
-    .then(() => process.stdout.write(`started ci-verify on #${pr.number} (${pr.headRefName})\n`))
-    .catch((e) => process.stdout.write(
-      `::warning::could not start ci-verify on #${pr.number}: ${String(e.message).split('\n')[0]}\n`));
+// And it is still that branch, in this repository, before this job's token starts CI on it.
+const head = await ghJson(['pr', 'view', pr, '--json', 'headRefName,isCrossRepository']).catch(() => null);
+if (head?.headRefName !== branch || head?.isCrossRepository !== false) {
+  process.stdout.write(`::warning::#${pr} is not ${branch} in this repository — not starting CI on it\n`);
+  process.exit(0);
 }
+
+await gh(['workflow', 'run', 'ci-verify.yml', '-f', `pr=${pr}`])
+  .then(() => process.stdout.write(`started ci-verify on #${pr} (${branch})\n`))
+  .catch((e) => process.stdout.write(
+    `::warning::could not start ci-verify on #${pr}: ${String(e.message).split('\n')[0]}\n`));

@@ -6,30 +6,26 @@
 // instead of re-opening the PR it just rejected. A work order that forgot to increment is
 // therefore not a cosmetic slip — it silently turns a rework into a no-op.
 //
-// So it is not an instruction. The previous version comes off the issue, the new one is that
-// plus one, and the agent's own number is overwritten whatever it said.
+// So it is not an instruction. It is counted from the ledger's record of the work order, the
+// same way post-work-order counts it when it posts, and the agent's own number is overwritten
+// whatever it said. It used to be the highest version in any comment on the issue, so a number
+// anyone typed into a JSON block became the pipeline's.
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { ghJson, extractJsonBlock, setOutput, die } from './lib/actions.js';
+import { setOutput, die, repo as repoOf } from './lib/actions.js';
+import { readLedger } from './lib/state-io.js';
+import { nextWorkOrderVersion } from './lib/work-order.js';
 
 const issue = process.env.ISSUE ?? die('ISSUE is required');
 const file = process.env.FILE ?? 'work-order.json';
 
 const wo = JSON.parse(readFileSync(file, 'utf8'));
+const { ledger } = await readLedger(repoOf(), Number(issue));
 
-const data = await ghJson(['issue', 'view', issue, '--json', 'comments']);
-let previous = 0;
-for (const c of data.comments ?? []) {
-  const posted = extractJsonBlock(c.body);
-  if (posted?.files && posted?.acceptance) previous = Math.max(previous, Number(posted.version) || 1);
-}
-if (!previous) die(`issue #${issue} has no posted work order to revise`);
-
-const next = previous + 1;
+// Past whatever the branch implements too, exactly as post-work-order numbers it.
+const next = Math.max(nextWorkOrderVersion(ledger), (ledger?.implemented_version ?? 0) + 1);
 if (wo.version !== next) process.stdout.write(`agent wrote version ${wo.version ?? '(none)'} — correcting to ${next}\n`);
 wo.version = next;
 writeFileSync(file, `${JSON.stringify(wo, null, 2)}\n`);
 
 setOutput('version', String(next));
-setOutput('previous', String(previous));
-process.stdout.write(`work order v${previous} -> v${next}\n`);

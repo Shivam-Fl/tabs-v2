@@ -32,18 +32,34 @@ posted. So be specific enough to be verified — a finding nobody can check gets
 
 ## Output `review/correctness.json`
 
-```jsonc
+Exactly that path, relative to the repository root — `review/correctness.json`, not
+`correctness.json`. It is validated against `.sdlc/schemas/review-correctness.json` the moment
+you finish, and a missing or unreadable file stops the review: it used to read as "no
+findings", and a PR nobody had checked was announced as cleanly cross-reviewed.
+
+```json
 {
   "findings": [
-    { "severity": "blocking | major | minor",
-      "file": "src/x.ts", "line": 44,
+    { "severity": "blocking",
+      "file": "src/x.ts", "line": 44, "ac": "AC-3",
       "claim": "...", "evidence": "grep output / the input that breaks it", "fix": "..." }
   ],
   "callers_verified": ["src/a.ts:12", "src/b.ts:88"],
   "tests_would_fail_before_fix": true,
-  "verdict": "approve | request-changes"
+  "verdict": "approve"
 }
 ```
+
+- `severity` is exactly one of `blocking`, `major`, `minor`. `verdict` is `approve` or
+  `request-changes`, and informational: the merged verdict comes from the findings that
+  survive verification.
+- `ac` is the acceptance criterion the finding breaks, as `AC-n`, when there is one.
+- Write `"findings": []` when there is nothing. Leave out an optional field you have nothing
+  for; do not write `null`.
+
+`ac` matters: a criterion blocked two rounds running sends the work order to root-cause
+instead of back to the implementer, and this field is how the pipeline tells it is the same
+criterion. `major` and `minor` findings left unfixed on an approval become one follow-up issue.
 
 Evidence is mandatory. "This looks risky" is not a finding; "`parseAmount` returns NaN for
 an empty string and line 44 passes it straight to `toFixed`" is.

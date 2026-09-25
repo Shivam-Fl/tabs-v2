@@ -8,9 +8,89 @@ import { promisify } from 'node:util';
 const exec = promisify(execFile);
 
 const pr = process.env.PR;
-const detail = await ghJson(['pr', 'view', pr, '--json', 'body']);
-const issue = (detail.body ?? '').match(/(?:closes|fixes|resolves)\s+#(\d+)/i)?.[1];
-if (!issue) { process.stdout.write('PR #' + pr + ' closes no issue — nothing to advance\n'); process.exit(0); }
+const detail = await ghJson(['pr', 'view', pr, '--json', 'body,headRefName']);
+const closesOf = (d) => String(d.body ?? '').match(/(?:closes|fixes|resolves)\s+#(\d+)/i)?.[1];
+
+// A merged REVERT takes a shipped issue's code back off the default branch.
+//
+// It closes nothing, so this printed "closes no issue — nothing to advance": the issue stayed
+// done, and every issue that depends on it went on building against code that was gone.
+// GitHub's revert button writes "Reverts owner/repo#40" and a `revert-40-…` branch.
+const reverted = String(detail.body ?? '').match(/^Reverts [\w.-]+\/[\w.-]+#(\d+)/m)?.[1]
+  ?? String(detail.headRefName ?? '').match(/^revert-(\d+)-/)?.[1];
+if (reverted) {
+  const original = await ghJson(['pr', 'view', reverted, '--json', 'body,headRefName']).catch(() => ({}));
+  const undone = closesOf(original) ?? String(original.headRefName ?? '').match(/^sdlc\/issue-(\d+)$/)?.[1];
+  if (!undone) {
+    process.stdout.write(`PR #${pr} reverts #${reverted}, which closed no issue — nothing to reopen\n`);
+    process.exit(0);
+  }
+  const { updateLedger } = await import('./lib/state-io.js');
+  const { repo: repoOf } = await import('./lib/actions.js');
+  const { dependenciesOf } = await import('./lib/deps.js');
+  const { retryHint } = await import('./lib/flow-graph.js');
+
+  await gh(['issue', 'reopen', undone]).catch((e) =>
+    process.stdout.write(`::warning::could not reopen #${undone}: ${String(e.message).split('\n')[0]}\n`));
+  await updateLedger(repoOf(), Number(undone), (l) => (l ? { ...l, reverted_by: Number(pr) } : null));
+  // Through advance, not reconcile: every state may move to needs-human, and the labels have to
+  // stop saying done.
+  await advance(undone, 'needs-human', { agent: 'release' });
+  await gh(['issue', 'comment', undone, '--body',
+    `## Reverted in #${pr}\n\n#${reverted} shipped this, and #${pr} reverted it, so its code is no ` +
+    'longer on the default branch. Reopened and parked; nothing restarts on its own.\n\n' +
+    `- ${retryHint('planning')} plans it again against the default branch as it is now.\n` +
+    '- `/sdlc replan "<what to do instead>"` changes the approach first.\n' +
+    '- Closing this issue ends it.']);
+
+  const open = await ghJson(['issue', 'list', '--state', 'open', '--limit', '1000', '--json', 'number,body']);
+  for (const d of open.filter((i) => dependenciesOf(i.body).includes(Number(undone)))) {
+    await gh(['issue', 'comment', String(d.number), '--body',
+      `#${undone}, which this issue depends on, was reverted in #${pr}: its code is no longer on ` +
+      'the default branch. Anything built here on top of it needs checking before it merges.'])
+      .catch((e) => process.stdout.write(`::warning::could not tell #${d.number}: ${String(e.message).split('\n')[0]}\n`));
+  }
+  process.stdout.write(`issue #${undone}: reverted by #${pr} — reopened, needs-human\n`);
+  process.exit(0);
+}
+
+const issue = closesOf(detail);
+
+// A merged pull request that does not CLOSE its issue still advances it.
+//
+// The project brief's PR deliberately carries no `Closes`: the architecture landing is not the
+// end of that issue, it is the start of everything planned against it. So merging it matched
+// nothing here, printed "closes no issue — nothing to advance", and the issue sat untouched.
+// A person merged the brief and watched the pipeline do nothing, which is the worst possible
+// answer — it looks like the merge was the wrong thing to do.
+//
+// The branch name is the link in that case. `sdlc/project-<n>` is written by
+// apply-project-brief and by nothing else.
+const advancing = issue ? null : (detail.headRefName ?? '').match(/^sdlc\/project-(\d+)$/)?.[1];
+
+if (!issue && !advancing) {
+  process.stdout.write('PR #' + pr + ' closes no issue and is not a project brief — nothing to advance\n');
+  process.exit(0);
+}
+
+if (advancing) {
+  // Not `merged`, and not closed: this issue continues. Hand it to whatever its route says
+  // comes after the architecture decision — the maintainer on an epic, the planner otherwise.
+  const { handOffNext } = await import('./lib/route-io.js');
+  const { repo: repoOf } = await import('./lib/actions.js');
+  await advance(advancing, 'planning', { agent: 'project-planner' }).catch(() => {});
+  await gh(['issue', 'comment', String(advancing), '--body',
+    `The architecture brief merged in #${pr}. \`.sdlc/memory/project.md\`, the ADRs and the ` +
+    'documents under `docs/` are on the default branch now, and every ticket after this is ' +
+    'planned against them.\n\nContinuing this issue — merging the brief is not the end of it.'])
+    .catch(() => {});
+  const { stage } = await handOffNext({
+    repo: repoOf(), issue: advancing, from: 'project', agent: 'project-planner',
+    why: 'the architecture brief merged, and what comes after it is on the route',
+  });
+  process.stdout.write(`issue #${advancing}: brief merged -> ${stage ?? '(end of route)'}\n`);
+  process.exit(0);
+}
 
 const ctl = (...a) => exec('node', ['.sdlc/bin/sdlc-ctl.mjs', ...a]);
 // The PR is merged — GitHub just said so. This records that fact; it does not ask the state
@@ -56,5 +136,10 @@ await exec('node', ['.sdlc/bin/wake-dependents.mjs'], {
     'Anything waiting on this issue is still parked and nothing will start it on its own. ' +
     'Re-run `wake-dependents.mjs`, or comment `/sdlc approve` on the blocked issues.']).catch(() => {});
 });
+
+// Nothing else moved `merged` to `done` — the release prompt asked a model to set the label —
+// so every shipped issue sat at `merged`, and the watchdog reported each one as stalled on
+// every sweep. Closed and its dependents woken: the pipeline's part is over.
+await advance(issue, 'done', { agent: 'release' });
 
 setOutput('issue', issue);

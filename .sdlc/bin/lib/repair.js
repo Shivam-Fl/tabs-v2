@@ -1,30 +1,34 @@
 // Fix what is mechanically fixable, before deciding anything is wrong.
 //
-// A plan council — three agents, twenty minutes of model work — was thrown away because one
-// prose string came out 513 characters against a 500 limit. The pipeline was correct by its
-// own rules and useless in practice, and the same shape had already cost a root-cause run and
-// a QA run.
+// "Fail closed, loudly" is right for a CLAIM: a verdict with no evidence, a work order touching
+// a reserved path, a `next_action` nobody can route. It is wrong for a REPRESENTATION — the
+// right number wearing quotes, an enum in the wrong case, a field the schema never asked for.
+// Discarding the whole artifact over one of those breaks everything downstream by definition.
 //
-// The rule I had applied everywhere, "fail closed, loudly", is right for a CLAIM: a verdict
-// with no evidence, a work order touching a reserved path, a `next_action` nobody can route.
-// It is wrong for a LIMIT. Length caps, array caps and stray fields exist to keep artifacts
-// readable, and nothing downstream breaks if a sentence is trimmed — whereas discarding the
-// whole artifact breaks everything downstream by definition.
+// Length is not repaired, because nothing is limited by it: the schemas carry no length or
+// count caps. They were trimmed here and rejected there, and between them threw away a plan
+// council, a root-cause run, a QA run and a project brief — each correct, each discarded for
+// how much it said. GitHub's own limits on a title or a body are met where the text is posted,
+// in gh() (lib/actions.js), not by making the artifact shorter.
 //
-// So: repair the cosmetic, then validate the rest. What gets repaired is reported, because a
-// silent trim is how a limit becomes invisible and then meaningless.
+// So: repair the representation, then validate the rest. What gets repaired is reported,
+// because a silent repair is how a rule becomes invisible.
 
-const ELLIPSIS = '…';
+const scalar = (v) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
 
 /**
- * @returns {{data: any, repairs: string[]}} the document with cosmetic violations corrected
+ * @returns {{data: any, repairs: string[]}} the document with representation slips corrected
  */
 export function repair(schema, data, path = '') {
   const repairs = [];
   const at = (k) => (path ? `${path}.${k}` : String(k));
 
-  const walk = (sch, val, where) => {
-    if (!sch || val === null || val === undefined) return val;
+  const walk = (schema, val, where) => {
+    if (!schema || val === null || val === undefined) return val;
+    // A nullable field is repaired as the one type it takes besides null — a null has already
+    // returned above. A union of two real types is left alone: which one was meant is a guess.
+    const types = [].concat(schema.type ?? []).filter((t) => t !== 'null');
+    const sch = { ...schema, type: types.length === 1 ? types[0] : undefined };
 
     // Follow the one composition keyword the schemas actually use. Anything else is left to
     // the validator, which is fail-closed about keywords it does not implement.
@@ -50,16 +54,8 @@ export function repair(schema, data, path = '') {
     }
 
     if (sch.type === 'array' && Array.isArray(val)) {
-      // Entries are repaired; the LIST is never shortened.
-      //
-      // This used to keep the first N and drop the rest, which is indefensible for the arrays
-      // these schemas actually hold: `bugs`, `tests`, `acceptance_rollup`, `files`. Dropping
-      // the 61st bug from a QA report produces a report that passes its own consistency check
-      // and no longer says what the agent found — a silent edit to a merge decision.
-      //
-      // Trimming a sentence loses wording. Trimming a list loses findings. An over-long list
-      // is rare, always meaningful, and the agent is now told the cap up front, so overflow
-      // fails loudly and is re-emitted rather than quietly becoming a shorter truth.
+      // Entries are repaired; the list is never shortened. Dropping the 61st bug from a QA report
+      // leaves a report that passes its own consistency check and no longer says what was found.
       return val.map((v, i) => walk(sch.items, v, `${where}[${i}]`));
     }
 
@@ -89,6 +85,22 @@ export function repair(schema, data, path = '') {
       return String(val);
     }
 
+    // A list, or a flat record, where one string was asked for.
+    //
+    // `trd.interfaces[].errors` is described as "what the caller sees when it fails", and a
+    // planner answered `["400 invalid_payload", "409 duplicate_event_id"]` — the natural shape
+    // for a plural. It was the same shape as the `ui.layouts[].states` failure already fixed
+    // once, and it lost a whole project brief the same way. Every entry is kept, one per line;
+    // only a list of scalars qualifies, because nesting is a shape the reader would have to guess.
+    if (sch.type === 'string' && val && typeof val === 'object') {
+      const entries = Array.isArray(val) ? val : Object.entries(val);
+      const flat = Array.isArray(val) ? val.every(scalar) : entries.every(([, v]) => scalar(v));
+      if (entries.length && flat) {
+        repairs.push(`${where}: ${Array.isArray(val) ? 'a list' : 'a record'} of ${entries.length} read as one line each`);
+        val = Array.isArray(val) ? val.join('\n') : entries.map(([k, v]) => `${k}: ${v}`).join('\n');
+      }
+    }
+
     // One value where a list was asked for. The commonest JSON slip there is, and the
     // intended reading is not in doubt — an agent that names one file meant a list of one.
     if (sch.type === 'array' && !Array.isArray(val) && typeof val !== 'object') {
@@ -107,21 +119,6 @@ export function repair(schema, data, path = '') {
         repairs.push(`${where}: "${val}" read as "${hit}"`);
         return hit;
       }
-    }
-
-    if (sch.type === 'string' && typeof val === 'string') {
-      if (typeof sch.maxLength === 'number' && val.length > sch.maxLength) {
-        repairs.push(`${where}: trimmed from ${val.length} to ${sch.maxLength} characters`);
-        // Cut at a word boundary where one is near the end, so the trim reads as an edit
-        // rather than as corruption.
-        const cut = val.slice(0, sch.maxLength - ELLIPSIS.length);
-        const space = cut.lastIndexOf(' ');
-        // `> 0` matters: lastIndexOf returns -1 when there is no space at all, and -1 clears
-        // any negative threshold, which silently cut one more character than intended.
-        const atWord = space > 0 && space > cut.length - 60;
-        return (atWord ? cut.slice(0, space) : cut) + ELLIPSIS;
-      }
-      return val;
     }
 
     return val;

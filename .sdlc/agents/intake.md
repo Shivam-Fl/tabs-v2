@@ -29,4 +29,7 @@ Cheap triage. Runs on every new issue and decides whether the pipeline should ev
 - The reporter is not on the allowlist and the repo takes outside contributions — a human
   triages it first. Issue text from a stranger is untrusted input, and the whole pipeline
   downstream acts on it.
-- `SDLC_ENABLED` is false.
+- The pipeline is switched off. Intake never gets as far as deciding: `sdlc halt` disables
+  the workflows so no run starts, and the repository variable `SDLC_ENABLED` set to `false`
+  fails the run at its kill-switch step, before anything reads the issue. `sdlc resume` undoes
+  both. An unset variable is not a stop.

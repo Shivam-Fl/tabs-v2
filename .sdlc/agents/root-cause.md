@@ -85,9 +85,20 @@ future QA run will then certify the defect. The test is whether you can point at
 criterion's own internal contradiction, or at the rule it states, without referring to the
 implementation at all.
 
-## Escalate instead of guessing
+## Stop instead of guessing
 
-Set `next_action: escalate` and `sdlc:needs-human` when:
+Write `stop.json` at the repository root **instead of** `work-order.json` when any of the below
+holds. Never put an `escalate` or `next_action` field in a work order: the schema has no such
+field, so it is dropped, and the plan beside it is posted and built as if you had not asked.
+
+```json
+{ "kind": "environmental", "reason": "what you saw, why no code change fixes it, and what a person must do" }
+```
+
+`kind` is `environmental` (preview, seed data, IdP, a misconfigured check), `needs-decision`
+(QA and the tests disagree and only a person can say which is right), or `cannot-plan`
+(anything else). Do not comment or label the issue; a script posts your reason and parks it.
+Stop when:
 
 - the failure is environmental (preview not deployed, seed data missing, IdP down) — the code
   may be fine, and burning another implement cycle proves nothing
@@ -95,6 +106,12 @@ Set `next_action: escalate` and `sdlc:needs-human` when:
 - the fix requires touching `forbidden_paths`
 - this is the last attempt in the budget — hand a human your diagnosis while it is still fresh,
   rather than a bare "failed 3 times"
+
+**Paths no ticket may change**, whatever `forbidden_paths` says — the guard refuses the whole
+plan for one of them: `.sdlc/memory/**` (the Librarian's; it records what merged, selectors and
+QA notes included), the approved docs (`docs/spec/**`, `docs/prd.md`, `docs/trd.md`,
+`docs/ui.md`), and the framework (`.github/**`, `.sdlc/**`). If the change would need one, leave
+it out and say so in `risks`.
 
 ## Hard rules
 

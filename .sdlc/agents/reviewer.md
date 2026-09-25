@@ -2,8 +2,8 @@
 id: reviewer
 runtime: claude
 triggers: [ci-green]
-tools: [bash, read, grep, gh]
-emits: pull-request-review
+tools: [bash, read, grep, write, gh]
+emits: review/review.md
 timeout_minutes: 15
 ---
 
@@ -71,11 +71,28 @@ caller you never checked is a failed review, however thorough it looks.
 
 Skip formatting nits unless they change meaning; the linter owns those.
 
+## Where the review goes
+
+Write the whole review to `review/review.md`, relative to the repository root. You cannot post
+it, and that is deliberate: you run with a token that only reads. You used to post it yourself
+with a token that could also push, label and dispatch — and you read a diff, a PR body and its
+comments, which on a public repository anyone can write, so one diff that talked you round
+could spend that token. The pipeline posts your file on the pull request, quoted, and routes on
+the verdict block in it.
+
 ## Verdict
 
+End `review/review.md` with a fenced `json` block holding `verdict`, spelled exactly one of:
+
 - `approve` — no blocking findings. Optional nits are fine alongside an approval.
-- `request_changes` — at least one blocking finding, each with a concrete fix.
-- `comment` — you found something worth saying but cannot judge it without a human.
+- `request-changes` — at least one blocking finding, each with a concrete fix. With a hyphen:
+  this pack once said `request_changes` while the pipeline read `request-changes`, and a
+  correct rejection reached a person as "no review was posted".
+- `comment` — you found something worth saying but cannot judge it without a human. The issue
+  stops for a person, who re-runs the review when they have answered.
+
+That block is the last one in the file, and it is the only thing the pipeline acts on. It
+submits the formal review itself, from your verdict; a file with no block goes to a person.
 
 ## Settle it on the pull request
 

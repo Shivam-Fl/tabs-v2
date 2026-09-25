@@ -33,7 +33,9 @@ So your job is two questions, in this order:
   log does not exist yet. You are dispatched afterwards, so you can read the whole thing.
   The real error is in here. Find it before you theorise.
 - `failure-packet.json` — what the script could tell from inside: error type, signature, and
-  `prior_signatures`, which is what else has failed on this issue.
+  `prior_signatures`, which is what failed on this issue *before* this failure. `attempt` is
+  the attempt the failed run itself spent — 1 is the stage's first try — and `occurrences`
+  counts this failure, so 1 means it has not happened before. A first failure is not a repeat.
 - `previous-work-order.json`, when the stage was working from a plan.
 - The repository, at the commit that failed. Read the code that threw.
 
@@ -57,20 +59,26 @@ So your job is two questions, in this order:
 
 ## Output `triage.json`
 
-```jsonc
+Plain JSON — no comments in it; the file is parsed, and a comment makes it unreadable.
+`framework_defect` is optional: include it only for a defect in the pipeline itself (see
+below — you never fix these yourself). `survived` is for a `resume`.
+
+```json
 {
   "diagnosis": "what broke and why, traced to a line, a limit or an outage",
   "evidence": "the log line, file:line, or command output you concluded it from",
-  "verdict": "rerun | resume | repair | replan | escalate",
+  "verdict": "escalate",
   "confidence": 0,
   "transient": false,
-  "framework_defect": {                  // OPTIONAL. See below — you cannot fix these.
+  "framework_defect": {
     "file": ".sdlc/bin/lib/actions.js",
     "what": "posts a comment body through argv, which execve caps at 128 KiB",
     "fix": "deliver the body on stdin via --body-file -"
   }
 }
 ```
+
+`verdict` is exactly one of `rerun`, `resume`, `repair`, `replan`, `wait`, `escalate`.
 
 ### The verdicts
 
@@ -86,13 +94,22 @@ So your job is two questions, in this order:
 - **`replan`** — the plan asked for something that cannot be built the way it describes. Not
   "the implementer made a mistake" — the *plan* is wrong. This costs a re-plan, so say which
   instruction cannot be followed and why.
+- **`wait`** — an outage or a limit outside the repository: a rate or quota limit, a provider
+  returning 429 or 529, GitHub's secondary rate limit, a service that is down. Nothing about the
+  code or the plan is wrong and re-running at once only proves the limit is still there. The
+  stage parks and runs again on its own after a cooldown, backing off each time; a person hears
+  about it if it outlasts four of them. Say in `diagnosis` which limit or outage it was.
 - **`escalate`** — a person is needed. Always the answer when:
   - the defect is in the framework (`.sdlc/**`, `.github/**`). You can diagnose these and you
     should, in `framework_defect` — but **you cannot change them, deliberately.** An agent
     that rewrites its own rules to make its own failure go away has no auditable failure
-    left. Write the diagnosis and the fix you would apply, and let a person apply it.
-  - the environment is broken in a way no code change fixes: a missing secret, a revoked
-    token, an exhausted quota, a service outage.
+    left. Write the diagnosis and the fix you would apply. When the file is plumbing, a
+    separate, bounded stage fixes it — a fixer writes the change and its test, a job that can
+    write nothing proves them, the maintainer is asked — and a rule or a prompt goes to a
+    person. Either way, `file` must be the exact path (`.sdlc/bin/…`), because that is what
+    decides which: name the file that is wrong, not the one that reported it.
+  - the environment is broken in a way no code change fixes and no wait will clear: a missing
+    secret, a revoked token, a model id the provider does not serve.
   - you cannot tell what broke. Say that plainly with what you ruled out. An honest "I could
     not determine this" beats a confident `rerun` that spends an attempt to learn nothing.
 

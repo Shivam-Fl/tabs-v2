@@ -19,20 +19,22 @@
 // bounds an unattended retry loop.
 
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { gh, ghJson, setOutput, loadConfig, die, ERROR_LOG } from './lib/actions.js';
+import { gh, ghJson, setOutput, loadConfig, die, ERROR_LOG, switchedOff, trustedComments } from './lib/actions.js';
 import { handOff } from './lib/handoff.js';
-import { markResume } from './lib/route-io.js';
+import { markResume, dispatchStage } from './lib/route-io.js';
 import { advance } from './lib/advance.js';
 import { digest } from './lib/digest.js';
-import { signatureOf, classify, decide, recordFailure, consecutive } from './lib/failure.js';
+import {
+  signatureOf, classify, decide, recordFailure, runtimeTries, parkForCooldown,
+} from './lib/failure.js';
 import { validate, formatErrors } from './lib/validate.js';
 import { readLedger, updateLedger } from './lib/state-io.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { checkBudget, failedAttempt } from './lib/ledger.js';
+import { resolveStage, retryHint } from './lib/flow-graph.js';
+import { readWorkOrder } from './lib/work-order.js';
 
-const exec = promisify(execFile);
 const repo = process.env.GITHUB_REPOSITORY ?? die('GITHUB_REPOSITORY is not set');
-const stage = process.env.STAGE ?? die('STAGE is required (plan|implement|ci|review|qa|root-cause|gate|maintainer)');
+const stage = process.env.STAGE ?? die('STAGE is required: the stage that failed, as the flow graph names it');
 const runUrl = process.env.RUN_URL ?? '';
 // The tail of the log, because the failure is always at the end of it. Capped low enough
 // that the packet can be posted IN FULL as a fenced block — a re-dispatched stage reads the
@@ -43,23 +45,10 @@ const MAX_EXCERPT = 6000;
 // The steps that run a model. A failure here is the agent RUNTIME, not the project's code.
 const AGENT_STEP = /^(plan|implement|review|council|debug|test it|decide the|diagnose|split|release notes|route|triage)/i;
 let agentRuntimeFailed = false;
-
-// Which workflow answers a failure in this stage, and which attempt counter it spends.
-//
-// `ci` and `implement` share both: a red build is answered by the implementer, on the same
-// branch, and it costs a `ci` attempt — the counter that existed from the first commit and
-// that nothing had ever incremented, because nothing ever re-dispatched on a red build.
-const STAGE = {
-  plan:         { workflow: 'sdlc-plan.yml',        counter: 'plan',   rework: null },
-  implement:    { workflow: 'sdlc-implement.yml',   counter: 'ci',     rework: 'fix:implement-failed' },
-  ci:           { workflow: 'sdlc-implement.yml',   counter: 'ci',     rework: 'fix:ci-red' },
-  gate:         { workflow: 'sdlc-implement.yml',   counter: 'ci',     rework: 'fix:gate-failed' },
-  review:       { workflow: 'sdlc-review.yml',      counter: 'review', rework: null },
-  qa:           { workflow: 'sdlc-qa.yml',          counter: 'qa',     rework: null },
-  'root-cause': { workflow: 'sdlc-root-cause.yml',  counter: 'plan',   rework: null },
-  maintainer:   { workflow: 'sdlc-maintainer.yml',  counter: null,     rework: null },
-};
-const route = STAGE[stage] ?? die(`unknown stage "${stage}"`);
+// The Actions run of the first failing check on the PR. For a red build that is the log worth
+// reading — the gate that noticed has none of its own, and never had a RUN_ID either, so the
+// triage of the commonest failure in the pipeline was dispatched with an empty `failed_run`.
+let failingCheckRun = null;
 
 // --- who is this about -------------------------------------------------------
 let pr = process.env.PR ? Number(process.env.PR) : null;
@@ -77,6 +66,47 @@ if (!issue) {
   setOutput('action', 'none');
   process.exit(0);
 }
+
+// --- a stop is not a failure ------------------------------------------------
+//
+// A spent budget and `/sdlc stop` both end the job red: `attempt` exits non-zero at the cap,
+// and a halted issue's claim throws. This handler then announced "<stage> failed", recorded a
+// failure that never happened into the history the repeat bound reads, and moved the issue from
+// budget-exceeded to needs-human with a hint that re-hit the cap. Both stops have already said
+// so on the issue. The budget is read off the counters too, not only the state: from
+// `planning` the move to budget-exceeded is refused, so a plan budget stop leaves the state
+// where it was and only the counter says what happened.
+const cfg = await loadConfig();
+const before = await readLedger(repo, issue).then((r) => r.ledger).catch(() => null);
+if (before && (before.state === 'budget-exceeded' || before.halted || !checkBudget(before, cfg.limits).ok)) {
+  process.stdout.write(`issue #${issue}: ${before.halted ? `halted by @${before.halted.by}` : 'its budget is spent'} ` +
+    '— that stop has already announced itself; nothing recorded, nothing dispatched\n');
+  setOutput('action', 'none');
+  process.exit(0);
+}
+
+// The owner's kill switch is a stop as well. SDLC_ENABLED=false fails every run at its kill-switch
+// step, and each failure handler runs after that: in the same job, which the guard exported the
+// variable to, or in a job of its own, where the jobs API names the step that failed. Read as a
+// failure, it went into the history the repeat bound reads and dispatched a triage — which then
+// stopped at its own guard, and its own handler escalated that.
+const thisRun = process.env.RUN_ID || process.env.GITHUB_RUN_ID;
+const stoppedBySwitch = switchedOff() || (Boolean(thisRun) && await ghJson(['api', `repos/${repo}/actions/runs/${thisRun}/jobs`])
+  .then((d) => (d.jobs ?? []).some((j) => (j.steps ?? []).some((st) => st.name === 'Kill switch' && st.conclusion === 'failure')))
+  .catch(() => false));
+if (stoppedBySwitch) {
+  process.stdout.write(`issue #${issue}: SDLC_ENABLED is "false" — the kill switch stopped this run; ` +
+    'nothing recorded, nothing dispatched\n');
+  setOutput('action', 'none');
+  process.exit(0);
+}
+
+// The stage this failure re-enters, and the attempt counter that stage spends. `ci` and `gate`
+// resolve to the implementer, which answers a red build on the same branch; `project` spends
+// `plan`. Resolved from the flow graph, like every other dispatch — three hand-copied tables
+// here, in apply-triage and in resume-cooled-down disagreed about which stages existed.
+const target = resolveStage(stage, { issue, pr: pr ?? before?.pr ?? null });
+const counter = target?.counter ?? null;
 
 /**
  * The part of a job log that says what went wrong.
@@ -140,6 +170,7 @@ async function collectRaw() {
       if (!bad) continue;
       const id = String(c.detailsUrl ?? c.targetUrl ?? '').match(/\/actions\/runs\/(\d+)/)?.[1];
       if (id) failedRuns.add(id);
+      if (id) failingCheckRun ??= id;
       else parts.push(`check "${c.name}" reported ${c.conclusion ?? c.state} and has no Actions log to read`);
     }
     for (const id of failedRuns) {
@@ -166,9 +197,29 @@ async function collectRaw() {
       const bad = (j.steps ?? []).filter((st) => st.conclusion === 'failure');
       for (const st of bad) {
         parts.push(`step "${st.name}" failed in job "${j.name}" (conclusion: ${st.conclusion})`);
-        if (AGENT_STEP.test(st.name)) agentRuntimeFailed = true;
+        // A model run that died within minutes produced nothing: an outage, a rate or quota
+        // limit. One that ran for ten minutes and more did work, and then broke — a hang, a
+        // step cap, an implementer that pushed most of the change. Parking that for a cooldown
+        // restarts it blind; it goes to the triage, which can read what it left behind. No
+        // duration in the text above: seconds differ between two runs of the same failure, and
+        // the signature would stop recognising it.
+        const ran = Date.parse(st.completed_at) - Date.parse(st.started_at);
+        if (AGENT_STEP.test(st.name) && !(ran > 10 * 60_000)) agentRuntimeFailed = true;
       }
     }
+
+    // And what those jobs said. A split workflow answers a failure in a job of its own —
+    // sdlc-implement's `failed`, sdlc-project's — whose runner never saw the SDLC_ERROR_LOG the
+    // dying script left on its own, so the step name above was the whole packet: "step Publish
+    // failed in job publish", and a triage with nothing to read. A job that has completed serves
+    // its log (this one, still running, does not). Put first, so the excerpt's tail keeps the
+    // step names beside it.
+    const logs = [];
+    for (const j of jobs.filter((x) => x.status === 'completed' && x.conclusion === 'failure').slice(0, 3)) {
+      const log = await gh(['api', '--allow-escape-sequences', `repos/${repo}/actions/jobs/${j.id}/logs`]).catch(() => '');
+      if (log) logs.push(`--- job: ${j.name} ---\n${focusOnError(log)}`);
+    }
+    parts.unshift(...logs);
 
     // Several agent steps dying inside the same minute, across different stages, is one
     // shared thing giving out rather than several unrelated faults — a token's rate or
@@ -240,10 +291,10 @@ async function collectRaw() {
   }
 
   // Last resort: our own CI already posted a digest to the PR. Weaker than the raw log, and
-  // still far better than the check names alone.
+  // still far better than the check names alone. Ours only: on a public repo anyone can post a
+  // "## CI failed" comment, and this text is the error the fixer is sent to act on.
   if (!parts.length && pr) {
-    const comments = await ghJson(['pr', 'view', String(pr), '--json', 'comments'])
-      .then((d) => d.comments ?? []).catch(() => []);
+    const comments = await trustedComments('pr', pr, null, { pipelineOnly: true }).catch(() => []);
     const ciComment = comments.slice().reverse().find((c) => /^##\s+CI failed/m.test(c.body ?? ''));
     if (ciComment) parts.push(ciComment.body);
   }
@@ -272,13 +323,12 @@ if (!raw) {
     stage,
     error_signature: signatureOf(`indescribable:${stage}:${process.env.RUN_ID ?? Date.now()}`),
     error_type: 'unknown',
-    attempt: (l.attempts?.[route.counter] ?? 0) + 1,
+    attempt: failedAttempt(l, counter, thisRun),
     at: new Date().toISOString(),
     digest: `the ${stage} stage failed and no log could be retrieved`,
   }) : null)).catch(() => {});
 
-  await markResume(repo, issue, stage === 'ci' || stage === 'gate' ? 'implement' : stage, 'retry')
-    .catch(() => {});
+  await markResume(repo, issue, target?.stage ?? stage, 'retry').catch(() => {});
   await advance(issue, 'needs-human', { agent: 'self-heal' }).catch(() => {});
   setOutput('action', 'escalate');
   process.exit(0);
@@ -286,22 +336,32 @@ if (!raw) {
 
 const excerpt = raw.length > MAX_EXCERPT ? raw.slice(-MAX_EXCERPT) : raw;
 const signature = signatureOf(excerpt);
-const errorType = process.env.ERROR_TYPE || classify(excerpt);
 const d = digest(excerpt);
+// An agent step that died within minutes, with nothing in the output a pattern recognises, IS
+// the runtime failing. The jobs-API line "step X failed" was the only evidence available from
+// inside the job and classify() calls that `unknown` — and the cooldown below waited on
+// `agent-runtime`, so it never fired: every rate or quota error in an agent step ended at a
+// person, which is the outcome the cooldown was written to remove.
+//
+// Decided by the step alone. The failed jobs' logs now travel with it, and an agent step's log
+// is the agent's transcript: a test it ran printing "not ok" is not the project failing the
+// step, and reading it as a finding would send an outage to a fixer instead of the cooldown.
+const errorType = agentRuntimeFailed
+  ? 'agent-runtime'
+  : process.env.ERROR_TYPE || classify(excerpt);
 const summary = d.findings.length
   ? d.summary
   : `The ${stage} stage failed and no known error pattern matched. The raw output is below.`;
 
 // --- what has already been tried --------------------------------------------
-const cfg = await loadConfig();
-const before = await readLedger(repo, issue).then((r) => r.ledger).catch(() => null);
 if (!pr && before?.pr) pr = before.pr;
 
 const entry = {
   stage,
   error_signature: signature,
   error_type: errorType,
-  attempt: (before?.attempts?.[route.counter] ?? 0) + 1,
+  // The attempt this run spent as it started, not one more than the counter: see failedAttempt.
+  attempt: failedAttempt(before, counter, thisRun),
   at: new Date().toISOString(),
   digest: summary.slice(0, 300),
 };
@@ -317,15 +377,26 @@ await updateLedger(repo, issue, (l) => {
 }).catch((e) => process.stdout.write(`::warning::could not record the failure on the ledger: ${e.message}\n`));
 
 // Is there a work order to put on trial? Root-cause revises a diagnosis; with no diagnosis
-// written down yet there is nothing for it to do, and the honest answer is a person.
-const workOrder = await exec('node', ['.sdlc/bin/fetch-work-order.mjs'], { env: { ...process.env, ISSUE: String(issue) } })
-  .then((r) => JSON.parse(r.stdout)).catch(() => null);
+// written down yet there is nothing for it to do, and the honest answer is a person. Read off
+// the ledger — the pipeline's own record — never out of whichever comment looks like one.
+const workOrder = await readWorkOrder(repo, issue, cfg).catch(() => null);
 
-// Is there an attempt left to act on a verdict? A diagnosis nothing can execute is a
-// diagnosis worth having on the issue but not worth a model run to produce.
-const budgetGone = (before?.attempts?.[route.counter] ?? 0) >= Number(cfg.limits?.attempts ?? 10);
+// The bound on an unattended loop. The same failure twice means the plan is wrong, not the
+// typing: the diagnosis goes on trial. Three times, or with nothing to put on trial, or with
+// no attempt left to act on any verdict, a person decides. Everything under that bound goes
+// to the triage.
+//
+// This bound used to exist only as dead code. Every failure that was not a runtime failure went
+// to the triage before decide() was consulted, so a red build answered with `repair` came back
+// red, went to the triage, was repaired again — for as long as the model kept choosing repair.
+const bound = decide(history, signature, {
+  repeatEscalate: Number(cfg.limits?.repeat_failure_escalate ?? 2),
+  attempts: before?.attempts?.[counter] ?? 0,
+  maxAttempts: Number(cfg.limits?.attempts ?? 10),
+  canRootCause: Boolean(workOrder),
+});
 
-const decision = agentRuntimeFailed && !d.findings.length
+const decision = errorType === 'agent-runtime'
   // The MODEL RUN failed, not the project's code. There is no diff to fix and no diagnosis
   // to revise — handing this to a fixer spends an attempt proving the runtime is still down.
   //
@@ -335,17 +406,12 @@ const decision = agentRuntimeFailed && !d.findings.length
   // exceeded on work that was never wrong.
   ? {
       action: 'escalate',
-      occurrences: consecutive(history, signature),
+      occurrences: bound.occurrences,
       reason: 'the agent runtime failed before it produced anything — no diff to fix and no ' +
               'diagnosis to revise. Usually a rate or quota limit on the token, not the code',
     }
-  : budgetGone
-    // No attempt left to spend on any verdict, so there is nothing for an agent to decide.
-    ? {
-        action: 'escalate',
-        occurrences: consecutive(history, signature),
-        reason: `the ${route.counter} budget is spent — a diagnosis now has no attempt to act on`,
-      }
+  : bound.action !== 'fix'
+    ? bound
     // Everything else goes to an AGENT, which is the whole point of this being a hand-off
     // and not a decision.
     //
@@ -361,15 +427,26 @@ const decision = agentRuntimeFailed && !d.findings.length
     // the next attempt different?
     : {
         action: 'triage',
-        occurrences: consecutive(history, signature),
+        occurrences: bound.occurrences,
         reason: 'an agent reads the failed run\'s full log and decides what happens next — ' +
                 'this script cannot see that log from inside the run that produced it',
       };
 
 // --- the packet --------------------------------------------------------------
+// The code this failed on. Nothing ever cleared the ledger's packet, and fetch-failure-packet
+// handed it to every `fix:` rework after — a sync-branch's fix:ci-red or a `/sdlc retry ci` days
+// later got an old or unrelated error, with a prompt telling the implementer to fix exactly that.
+// The packet is delivered only while the branch still stands where it failed. null when there is
+// no branch yet (a planning stage), which then matches only a branch that still does not exist.
+// Absent when the branch could not be read: that head is unknown, and "no branch" was a guess
+// that let the packet reach whatever code a read that worked found later.
+const head = await gh(['api', `repos/${repo}/branches/sdlc/issue-${issue}`, '--jq', '.commit.sha'])
+  .then((sha) => sha.trim() || null)
+  .catch((e) => (/404|Not Found/.test(String(e.stderr ?? e.message)) ? null : undefined));
 const packet = {
   issue,
   ...(pr ? { pr } : {}),
+  ...(head !== undefined ? { head } : {}),
   stage,
   attempt: entry.attempt,
   occurrences: Math.max(1, decision.occurrences),
@@ -386,7 +463,8 @@ const packet = {
       ? { failed_checks: process.env.FAILED_CHECKS.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 30) }
       : {}),
     ...(runUrl ? { run_url: runUrl.slice(0, 500) } : {}),
-    prior_signatures: history.slice(-20).map((h) => `${h.stage}:${h.error_type}:${h.error_signature}`),
+    // Before this one: the triage read its own signature here as a repeat of itself.
+    prior_signatures: history.slice(0, -1).slice(-20).map((h) => `${h.stage}:${h.error_type}:${h.error_signature}`),
   },
 };
 
@@ -400,9 +478,14 @@ if (!shape.ok) {
 }
 writeFileSync('failure-packet.json', `${JSON.stringify(packet, null, 2)}\n`);
 
+// The copy the next stage reads. fetch-failure-packet used to take the newest packet-shaped
+// block on the timeline, whoever wrote it — on a public repository that is anyone, and the
+// implementer is told to read the packet first. The comment below stays, for people.
+await updateLedger(repo, issue, (l) => (l ? { ...l, failure_packet: packet } : null))
+  .catch((e) => process.stdout.write(`::warning::could not keep the failure packet on the ledger: ${e.message}\n`));
+
 // --- say it where someone is looking -----------------------------------------
 const heading = {
-  fix: `## ${stage} failed — sending it back with the error attached`,
   triage: `## ${stage} failed — an agent is reading the log`,
   'root-cause': `## ${stage} failed the same way twice — the diagnosis goes on trial`,
   escalate: `## ${stage} failed — stopping`,
@@ -412,7 +495,7 @@ const body = [
   heading,
   '',
   `**${errorType}** · signature \`${signature}\` · ${decision.occurrences === 1 ? 'first occurrence' : `${decision.occurrences} in a row`}` +
-    (route.counter ? ` · ${route.counter} attempt ${entry.attempt}` : ''),
+    (counter ? ` · ${counter} attempt ${entry.attempt}` : ''),
   '',
   summary,
   '',
@@ -436,8 +519,7 @@ const body = [
   runUrl ? `\n[Run log](${runUrl})` : '',
 ].filter((l) => l !== null).join('\n');
 
-const target = pr ?? issue;
-await gh([pr ? 'pr' : 'issue', 'comment', String(target), '--body', body]).catch((e) =>
+await gh([pr ? 'pr' : 'issue', 'comment', String(pr ?? issue), '--body', body]).catch((e) =>
   process.stdout.write(`::warning::could not post the failure packet: ${String(e.message).split('\n')[0]}\n`));
 
 setOutput('action', decision.action);
@@ -445,39 +527,16 @@ setOutput('signature', signature);
 setOutput('error_type', errorType);
 
 // --- route -------------------------------------------------------------------
-// A provider outage is a WAIT, not a stop.
-//
-// `agent-runtime` means the model run failed before producing anything, which is almost always
-// a rate or quota limit — the code was never wrong. Retrying at once proves the limit is still
-// there and burns an attempt; stopping for a person means that at 2am the pipeline is finished
-// for the night over something that clears itself in twenty minutes.
-//
-// So it parks with a time, and the watchdog starts it again when that time passes. Backing off
-// each round, because a limit that is still there after one cooldown will not have moved in
-// another twenty minutes.
+// A provider outage is a WAIT, not a stop: it parks with a time, and the watchdog starts it
+// again when that time passes (lib/failure.js). How many cooldowns this outage has already had
+// is read off failure_history, the same way resume-cooled-down reads it.
 if (decision.action === 'escalate' && errorType === 'agent-runtime') {
-  const tries = Number(before?.runtime_retries ?? 0);
-  const maxRetries = Number(cfg.limits?.runtime_retries ?? 4);
-  if (tries < maxRetries) {
-    const minutes = Math.min(20 * 2 ** tries, 120);
-    const at = new Date(Date.now() + minutes * 60_000);
-    await updateLedger(repo, issue, (l) => {
-      l.retry_after = at.toISOString();
-      l.retry_stage = stage;
-      l.parked_at = new Date().toISOString();
-    }).catch(() => {});
-    await markResume(repo, issue, stage === 'ci' || stage === 'gate' ? 'implement' : stage, 'retry')
-      .catch(() => {});
-    // needs-human frees the in-flight slot, which is what lets everything else keep moving
-    // while this one waits. The watchdog is what brings it back.
-    await advance(issue, 'needs-human', { agent: 'self-heal' });
-    await gh(['issue', 'comment', String(issue), '--body',
-      `Parked for ${minutes} minutes: the agent runtime failed before it produced anything, ` +
-      'which is usually a rate or quota limit on the token rather than a problem with the ' +
-      `code.\n\nThe watchdog starts \`${stage}\` again after ${at.toISOString()} — ` +
-      `cooldown ${tries + 1} of ${maxRetries}. Nothing is lost; the slot is free for other ` +
-      'issues meanwhile. `/sdlc retry ' + stage + '` starts it sooner.']).catch(() => {});
-    process.stdout.write(`issue #${issue}: parked ${minutes}m waiting for the runtime\n`);
+  const parked = await parkForCooldown(repo, issue, stage, runtimeTries(history, stage) - 1, {
+    maxRetries: Number(cfg.limits?.runtime_retries ?? 4),
+    why: 'the agent runtime failed before it produced anything, which is usually a rate or ' +
+         'quota limit on the token rather than a problem with the code',
+  });
+  if (parked) {
     setOutput('action', 'cooldown');
     process.exit(0);
   }
@@ -488,71 +547,38 @@ if (decision.action === 'escalate') {
   // stage again — nothing after it can start, because the thing before it never finished.
   // Without this, approving resumed from wherever the last GATE was, which on an issue whose
   // very first stage crashed is a stage that has never run.
-  await markResume(repo, issue, stage === 'ci' || stage === 'gate' ? 'implement' : stage, 'retry');
+  await markResume(repo, issue, target?.stage ?? stage, 'retry');
   await advance(issue, 'needs-human', { agent: 'self-heal' });
+  // The hint names the stage that stopped. It said `/sdlc retry implementing` whatever stopped,
+  // so a plan budget stop told a person to start the implementer on an issue with no plan.
   await gh(['issue', 'comment', String(issue), '--body',
     `Stopped at \`${stage}\`: ${decision.reason}.\n\n` +
-    'Everything up to this point stands. `/sdlc retry implementing` clears the attempt ' +
-    'counters and starts again; `/sdlc approve` after changing something by hand does the same ' +
+    `Everything up to this point stands. ${retryHint(stage)} clears the attempt ` +
+    'counters and starts it again; `/sdlc approve` after changing something by hand does the same ' +
     'without clearing them.']).catch(() => {});
   process.stdout.write(`issue #${issue}: escalated — ${decision.reason}\n`);
   process.exit(0);
 }
 
-// An agent decides what this failure means. Dispatched rather than decided here, because the
-// log that answers it only exists once this run has finished.
-if (decision.action === 'triage') {
-  await handOff('sdlc-triage.yml', [
-    '-f', `issue=${issue}`,
-    ...(pr ? ['-f', `pr=${pr}`] : []),
-    '-f', `stage=${stage}`,
-    '-f', `failed_run=${process.env.RUN_ID ?? ''}`,
-  ], { issue, pr, why: 'a stage failed and an agent has to read the log before anything acts' });
-  process.stdout.write(`issue #${issue}: ${stage} failed (${errorType}) -> triage\n`);
-  process.exit(0);
-}
-
 if (decision.action === 'root-cause') {
-  await advance(issue, 'planning', { agent: 'self-heal' });
-  const args = ['-f', `issue=${issue}`];
-  if (pr) args.push('-f', `pr=${pr}`);
-  args.push('-f', 'from=failure');
-  await handOff('sdlc-root-cause.yml', args, {
-    issue, pr, why: 'the same failure twice means the plan is wrong, not the code',
-  });
+  // Resolved without the ledger's pending context: that belongs to whatever root-cause was last
+  // asked about, and this one is about a repeating failure, not a QA run.
+  const r = await dispatchStage({ repo, issue, target: resolveStage('root-cause', { issue, pr }),
+    agent: 'self-heal', extra: { from: 'failure' },
+    why: 'the same failure twice means the plan is wrong, not the code' });
+  process.stdout.write(`issue #${issue}: ${stage} failed the same way twice -> root-cause` +
+    `${r.dispatched ? '' : ' (not dispatched)'}\n`);
   process.exit(0);
 }
 
-// fix: the same role that failed gets another go, with the raw error and its own work order.
-// The attempt is consumed BEFORE the agent runs, so a stage that crashes on startup still
-// burns budget and the loop terminates.
-if (route.counter) {
-  const spent = await exec('node', ['.sdlc/bin/sdlc-ctl.mjs', 'attempt',
-    '--issue', String(issue), '--stage', route.counter, '--agent', 'self-heal'])
-    .then(() => true)
-    .catch((e) => {
-      process.stdout.write(`${String(e.stdout || e.stderr || e.message).trim()}\n`);
-      return false;
-    });
-  if (!spent) {
-    // `attempt` exits non-zero exactly when the budget is gone, and it has already moved the
-    // issue to budget-exceeded and said so. Nothing more to dispatch.
-    setOutput('action', 'escalate');
-    process.exit(0);
-  }
-}
-
-const args = [];
-if (route.workflow === 'sdlc-implement.yml') {
-  await advance(issue, 'implementing', { agent: 'self-heal' });
-  args.push('-f', `issue=${issue}`, '-f', `rework=${route.rework}`);
-} else if (route.workflow === 'sdlc-review.yml' || route.workflow === 'sdlc-qa.yml') {
-  args.push('-f', `pr=${pr}`);
-} else {
-  args.push('-f', `issue=${issue}`);
-}
-
-await handOff(route.workflow, args, {
-  issue, pr, why: `the ${stage} stage failed and the fix loop is answering it`,
-});
-process.stdout.write(`issue #${issue}: ${stage} failed (${errorType}) -> ${decision.action} via ${route.workflow}\n`);
+// An agent decides what this failure means. Dispatched rather than decided here, because the
+// log that answers it only exists once this run has finished. `failed_run` is the run whose
+// log explains it: for a red build the check that failed, otherwise this run.
+const failedRun = failingCheckRun || process.env.RUN_ID || process.env.GITHUB_RUN_ID || '';
+await handOff('sdlc-triage.yml', [
+  '-f', `issue=${issue}`,
+  ...(pr ? ['-f', `pr=${pr}`] : []),
+  '-f', `stage=${stage}`,
+  '-f', `failed_run=${failedRun}`,
+], { issue, pr, why: 'a stage failed and an agent has to read the log before anything acts' });
+process.stdout.write(`issue #${issue}: ${stage} failed (${errorType}) -> triage\n`);

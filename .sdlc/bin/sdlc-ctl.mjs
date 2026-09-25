@@ -10,12 +10,12 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { validate, formatErrors } from './lib/validate.js';
+import { loadArtifact, rememberRejected } from './lib/artifact.js';
 import { checkQaConsistency } from './lib/qa-consistency.js';
-import { repair } from './lib/repair.js';
 import { digest } from './lib/digest.js';
 import { parseCommand } from './lib/commands.js';
-import { gh, ghJson, noteError } from './lib/actions.js';
+import { retryHint } from './lib/flow-graph.js';
+import { gh, ghJson, noteError, switchedOff } from './lib/actions.js';
 import {
   newLedger, transition, acquireLock, releaseLock, isLockStale,
   bumpAttempt, checkBudget, pathsCollide, STAGES, STATES,
@@ -23,8 +23,17 @@ import {
 import {
   ensureStateBranch, readLedger, updateLedger, listLedgers,
 } from './lib/state-io.js';
+import { openIssues } from './lib/open-issues.js';
+import { IN_FLIGHT } from './lib/deps.js';
 
 const ROOT = process.env.SDLC_ROOT ?? process.cwd();
+
+// The open issues whose ledger a sweep can still act on: running, parked on a dependency, or
+// waiting to merge. Everything else — finished, parked for a person, an outsider's issue intake
+// refused — was read every sweep for nothing, at one API call each.
+const SWEPT = new Set([...IN_FLIGHT, 'sdlc:blocked', 'sdlc:qa-pass']);
+const sweptIssues = async (repo) => (await openIssues(repo))
+  .filter((i) => i.labels.some((l) => SWEPT.has(l))).map((i) => i.number);
 
 // --- argument parsing -------------------------------------------------------
 function parseArgs(argv) {
@@ -67,11 +76,15 @@ function setOutput(key, value) {
  * `guard` — the kill switch — is the first step of every workflow and runs BEFORE `npm ci`,
  * so that a disabled system skips the install entirely. A top-level import of any dependency
  * therefore breaks the one command that has to work when nothing else does. Keep this lazy.
+ *
+ * And it is the VENDORED copy, as in lib/actions.js. The bare 'js-yaml' resolved from the
+ * product's node_modules, which any agent's `npm ci` prunes — and lock, attempt, watchdog and
+ * command all read config here, after an agent may already have run.
  */
 export async function loadConfig(root = ROOT) {
   const path = join(root, '.sdlc', 'config.yml');
   if (!existsSync(path)) fail(`no config at ${path} — run \`sdlc init\` first`);
-  const { load: parseYaml } = await import('js-yaml');
+  const { load: parseYaml } = await import('./lib/js-yaml.mjs');
   const cfg = parseYaml(readFileSync(path, 'utf8'));
   if (!cfg || typeof cfg !== 'object') fail('config.yml did not parse to an object');
   return cfg;
@@ -87,18 +100,36 @@ const repoOf = (flags) => flags.repo ?? process.env.GITHUB_REPOSITORY ?? fail('n
 
 // --- commands ---------------------------------------------------------------
 const commands = {
-  /** Kill switch. First step of every workflow. Exits non-zero when the system is off. */
+  /**
+   * Kill switch. First step of every workflow. Exits non-zero when the owner switched it off.
+   *
+   * The pipeline's own switch is `sdlc halt`, which disables the workflows so nothing starts at
+   * all. This honours the repository variable too, because an owner who sets SDLC_ENABLED to
+   * false expects a stop — it never reached this step (a variable reaches a job only through
+   * `vars.`), so it halted nothing. Every guard step now maps it.
+   *
+   * Exit 1, said plainly. It exited 78, the "neutral" code of the Actions that predate YAML
+   * workflows; today any non-zero code fails the step, so the run went red with nothing saying
+   * why or how to undo it. A missing or empty variable is not a stop.
+   */
   async guard() {
-    if (String(process.env.SDLC_ENABLED ?? 'true').toLowerCase() === 'false') {
-      process.stdout.write('SDLC_ENABLED is false — halting.\n');
-      process.exit(78); // neutral: halt without marking the run failed
+    if (switchedOff()) {
+      process.stdout.write('::error::SDLC_ENABLED is "false" — this repository variable stops every pipeline run ' +
+        'here, at its first step. `sdlc resume` deletes it and starts the pipeline again; `sdlc halt` is the ' +
+        'switch that stops the workflows without a red run per event.\n');
+      // Every later step of this job sees it too: the `always()` steps and the failure handler
+      // still run after this one fails, and each of them has to know that this was a stop.
+      if (process.env.GITHUB_ENV) appendFileSync(process.env.GITHUB_ENV, 'SDLC_ENABLED=false\n');
+      noteError('SDLC_ENABLED is "false" — the kill switch stopped this run');
+      process.exit(1);
     }
     process.stdout.write('enabled\n');
   },
 
   /** Validate an agent artifact against its schema before anything downstream trusts it. */
   async validate(flags) {
-    const schema = loadSchema(need(flags, 'schema'));
+    const name = need(flags, 'schema');
+    loadSchema(name); // "unknown schema", rather than the loader's ENOENT
     const file = need(flags, 'file');
 
     // A missing artifact is the most common agent failure, and a raw ENOENT stack says
@@ -118,38 +149,44 @@ const commands = {
         (near.length ? `JSON files that do exist: ${near.join(', ')}` : 'No JSON files were written at all.'),
       );
     }
-    let data = JSON.parse(readFileSync(file, 'utf8'));
-
-    // Repair the cosmetic before judging the rest.
+    // Through the loader every script that ACTS on an artifact uses, so this step and those
+    // scripts cannot disagree about what is valid.
     //
-    // A plan council's work — three agents, twenty minutes — was discarded because one prose
-    // string was 513 characters against a limit of 500. Length caps and stray fields keep
-    // artifacts readable; nothing downstream breaks when a sentence is trimmed, while throwing
-    // the artifact away breaks everything downstream by definition. The strictness is kept for
+    // It repairs representation slips (a quoted number, an enum in the wrong case, a stray
+    // field) before judging the rest, because throwing the artifact away over one breaks
+    // everything downstream by definition. Length is never judged: the schemas carry no caps,
+    // and gh() meets GitHub's limits where the text is posted. The strictness is kept for
     // claims, which is what it was for.
-    const fixed = repair(schema, data);
-    if (fixed.repairs.length) {
-      data = fixed.data;
-      writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`);
+    const art = loadArtifact(name, file, { root: ROOT });
+    if (art.repairs.length) {
+      writeFileSync(file, `${JSON.stringify(art.data, null, 2)}\n`);
       process.stdout.write(
-        `Repaired ${fixed.repairs.length} cosmetic issue(s) rather than rejecting the file:\n` +
-        fixed.repairs.map((r) => `- ${r}`).join('\n') + '\n');
+        `Repaired ${art.repairs.length} cosmetic issue(s) rather than rejecting the file:\n` +
+        art.repairs.map((r) => `- ${r}`).join('\n') + '\n');
     }
 
-    const shape = validate(schema, data);
-    if (!shape.ok) {
-      process.stdout.write(
-        `Schema validation failed on something that cannot be mechanically fixed:\n${formatErrors(shape.errors)}\n`);
-      noteError(`schema validation failed: ${formatErrors(shape.errors)}`);
-      process.exit(1);
-    }
-    if (flags.schema === 'qa-report') {
-      const honest = checkQaConsistency(data);
-      if (!honest.ok) {
-        process.stdout.write(`Report is internally inconsistent:\n${honest.errors.map((e) => `- ${e}`).join('\n')}\n`);
-        noteError(`report is internally inconsistent: ${honest.errors.join('; ')}`);
-        process.exit(1);
+    // A rejected artifact is kept on the ledger. It lived only on the runner, so the one way to
+    // recover from a bad field was to pay for the whole stage again — eight minutes of research,
+    // or a three-agent council — and a rerun had nothing to correct.
+    const reject = async (what, errors) => {
+      process.stdout.write(`${what}:\n${errors.map((e) => `- ${e}`).join('\n')}\n`);
+      noteError(`${what.toLowerCase()}: ${errors.join('; ')}`);
+      const issue = flags.issue ?? process.env.ISSUE;
+      if (issue && (flags.repo ?? process.env.GITHUB_REPOSITORY)) {
+        await rememberRejected(repoOf(flags), issue, name, art.raw, errors);
+        const where = `the rejected ${name} is kept on issue #${issue}'s ledger as rejected_artifacts["${name}"]`;
+        process.stdout.write(`${where[0].toUpperCase()}${where.slice(1)}, for the rerun to correct.\n`);
+        noteError(where);
       }
+      process.exit(1);
+    };
+    if (!art.ok) {
+      await reject(art.data === null ? 'Not valid JSON'
+        : 'Schema validation failed on something that cannot be mechanically fixed', art.errors);
+    }
+    if (name === 'qa-report') {
+      const honest = checkQaConsistency(art.data);
+      if (!honest.ok) await reject('Report is internally inconsistent', honest.errors);
     }
     process.stdout.write('valid\n');
   },
@@ -172,9 +209,13 @@ const commands = {
     if (!parsed) { setOutput('command', ''); return; }
     setOutput('command', parsed.authorized ? parsed.command : '');
     setOutput('args', parsed.args.join(' '));
+    // What run-command reads as ARGS. Prose keeps its newlines — setOutput writes a delimited
+    // block — where `args` is the first line re-joined on single spaces.
+    setOutput('payload', parsed.payload ?? parsed.args.join(' '));
     setOutput('authorized', String(parsed.authorized));
     setOutput('reason', parsed.reason ?? '');
     setOutput('unconfigured', String(Boolean(parsed.unconfigured)));
+    setOutput('usage', String(Boolean(parsed.usage)));
     if (!parsed.authorized) process.stdout.write(`refused: ${parsed.reason}\n`);
   },
 
@@ -240,7 +281,11 @@ const commands = {
     if (!STATES.includes(to)) fail(`unknown state "${to}"`);
 
     const { ledger } = await updateLedger(repo, issue, (l) => {
-      const base = l ?? newLedger(issue);
+      // A halt stops work, and a merge means the work is over. Left standing, it refused every
+      // write after the merge — on-merge's own labels, the move to done — so a PR a person
+      // merged by hand after a stop, or whose close raced its merge, never finished.
+      const base = { ...(l ?? newLedger(issue)) };
+      if (['merged', 'done'].includes(to)) delete base.halted;
       const legal = transition(base, to, { agent: flags.agent ?? 'system' });
       if (legal.ok) return legal.ledger;
       return {
@@ -339,13 +384,19 @@ const commands = {
 
     const { ledger } = await updateLedger(repo, issue, (l) => {
       const base = l ?? newLedger(issue);
-      const bumped = bumpAttempt(base, stage, { agent: flags.agent ?? stage });
+      // Which run spent it, so this run's failure handler can tell it is already counted.
+      const bumped = bumpAttempt(base, stage, { agent: flags.agent ?? stage, runId: process.env.GITHUB_RUN_ID ?? null });
       if (!bumped.ok) fail(bumped.reason);
       const budget = checkBudget(bumped.ledger, cfg.limits);
       if (!budget.ok) {
         exceeded = budget.reason;
         const stopped = transition(bumped.ledger, budget.terminal, { agent: 'watchdog' });
-        return stopped.ok ? stopped.ledger : bumped.ledger;
+        if (stopped.ok) return stopped.ledger;
+        // Parked anyway. A refused stop left the ledger — and so the label — at an in-flight
+        // state: the issue held a max_in_flight slot and every sweep found the same cap again.
+        // needs-human is reachable from everywhere, and it is not a slot.
+        const parked = transition(bumped.ledger, 'needs-human', { agent: 'watchdog' });
+        return parked.ok ? parked.ledger : bumped.ledger;
       }
       return bumped.ledger;
     });
@@ -360,15 +411,21 @@ const commands = {
       // That is this framework's own worst failure mode: you find out by noticing that nothing
       // happened. So the stop announces itself, on the issue, where the person who has to
       // decide something is looking.
+      // The label follows what the ledger actually recorded, or advance() refuses the outcome.
       const { advance } = await import('./lib/advance.js');
-      await advance(issue, 'budget-exceeded', { agent: 'system' }).catch(() => {});
+      if (ledger.state === 'budget-exceeded') await advance(issue, 'budget-exceeded', { agent: 'system' }).catch(() => {});
+      else await advance(issue, 'needs-human', { agent: 'system' }).catch(() => {});
       await gh(['issue', 'comment', String(issue), '--body',
         `## Stopped: ${exceeded}\n\n` +
         'Nothing further runs on this issue until a human decides.\n\n' +
         'The counter increments on **dispatch, not failure**, so this also catches an agent ' +
         'that kept crashing before it could do any work — and it counts re-runs a maintainer ' +
         'triggered by hand while debugging.\n\n' +
-        `Resume with \`/sdlc retry ${stage === 'plan' ? 'planning' : 'implementing'}\`, which ` +
+        // The counter's own stage, in the one form retry parses. "retry implementing" was
+        // printed for a review or QA cap, and following it re-ran the implementer on code
+        // nobody had objected to. `planning` for the plan counter, which project, plan, debug
+        // and root-cause all spend: retry resolves it to whichever of them stopped.
+        `Resume with ${retryHint(stage === 'plan' ? 'planning' : stage)}, which ` +
         'clears the counters, or `/sdlc stop` to leave it parked.',
       ]).catch(() => {});
 
@@ -400,7 +457,7 @@ const commands = {
       next = {
         ...next,
         attempts: Object.fromEntries(STAGES.map((st) => [st, 0])),
-        budget: { ...next.budget, minutes: 0 },
+        attempt_run: null,
         history: [...next.history, {
           at: new Date().toISOString(), agent: 'human',
           action: `budget reset (was ${JSON.stringify(l.attempts)})`,
@@ -446,7 +503,7 @@ const commands = {
     const { ledger } = await readLedger(repo, issue);
     if (!ledger?.touch_paths?.length) { setOutput('collides_with', ''); return; }
 
-    const others = (await listLedgers(repo)).filter((n) => n !== issue);
+    const others = (await sweptIssues(repo)).filter((n) => n !== issue);
     const hits = [];
     for (const other of others) {
       const { ledger: o } = await readLedger(repo, other);
@@ -463,9 +520,12 @@ const commands = {
     const now = new Date();
     const report = { reclaimed: [], exceeded: [], stalled: [] };
 
-    for (const issue of await listLedgers(repo)) {
+    for (const issue of await sweptIssues(repo)) {
       await updateLedger(repo, issue, (l) => {
-        if (!l || ['done', 'needs-human', 'budget-exceeded'].includes(l.state)) return null;
+        // Finished work and split epics are not stalled. Every merged issue and every epic
+        // tracking its children was reported as "something probably failed" on every sweep,
+        // forever, burying the one issue that really was stuck.
+        if (!l || ['merged', 'done', 'needs-human', 'budget-exceeded'].includes(l.state) || l.tracker === true) return null;
         let next = l;
         let changed = false;
 
@@ -475,10 +535,16 @@ const commands = {
           changed = true;
         }
         const budget = checkBudget(next, cfg.limits);
+        // Reported only when the stop was recorded. A refused one was reported anyway, so the
+        // same "Budget exceeded" was posted every sweep, and watchdog-report's move to a state
+        // the ledger had refused threw and dropped every report after it.
         if (!budget.ok) {
-          report.exceeded.push({ issue, reason: budget.reason });
           const stopped = transition(next, budget.terminal, { agent: 'watchdog' });
-          if (stopped.ok) { next = stopped.ledger; changed = true; }
+          if (stopped.ok) {
+            report.exceeded.push({ issue, reason: budget.reason, counter: budget.counter });
+            next = stopped.ledger;
+            changed = true;
+          }
         }
         // Waiting is not stalling.
         //
@@ -490,8 +556,13 @@ const commands = {
         const idleHours = (now - new Date(next.updated_at)) / 3_600_000;
         const parked = ['blocked', 'queued'].includes(next.state)
           || (next.blocked_on ?? []).length > 0;
-        if (!parked && idleHours > (cfg.limits?.stall_hours ?? 6)) {
+        // Once per stall, not once per sweep. The same "no progress for 9h" was posted every
+        // fifteen minutes. `stall_reported_for` is the updated_at it was reported at; writing
+        // it leaves updated_at alone, so the next real move is a new stall to report.
+        if (!parked && idleHours > (cfg.limits?.stall_hours ?? 6) && next.stall_reported_for !== next.updated_at) {
           report.stalled.push({ issue, hours: Math.round(idleHours) });
+          next = { ...next, stall_reported_for: next.updated_at };
+          changed = true;
         }
         return changed ? next : null;
       });

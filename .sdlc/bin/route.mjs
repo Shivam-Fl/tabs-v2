@@ -9,15 +9,25 @@
 // Writes flow-plan.json and `decided=true` when a rule fires, `decided=false` otherwise.
 // Never guesses: "I do not know" is a real answer here and the model pass is what it costs.
 
-import { existsSync, writeFileSync } from 'node:fs';
-import { ghJson, setOutput, loadConfig, die } from './lib/actions.js';
-import { fastPath, namedPaths, FULL } from './lib/route.js';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { ghJson, setOutput, loadConfig, die, isTrustedAuthor, repo } from './lib/actions.js';
+import { readLedger } from './lib/state-io.js';
+import { isStub } from './lib/project.js';
+import { fastPath, namedPaths, FULL, recordedDecisions } from './lib/route.js';
 
 const issue = process.env.ISSUE ?? die('ISSUE is required');
 const cfg = await loadConfig();
 const routing = cfg.route ?? {};
 
-const raw = await ghJson(['issue', 'view', issue, '--json', 'number,title,body,labels']);
+// REST, for the reporter's association: whose body this is decides which decisions in it count.
+const raw = await ghJson(['api', `repos/${repo()}/issues/${issue}`]);
+
+// For the model pass, which follows these and nothing else a person wrote.
+const ledger = await readLedger(repo(), Number(issue)).then((r) => r.ledger).catch(() => null);
+setOutput('decisions', recordedDecisions(raw.body, {
+  reporterTrusted: isTrustedAuthor({ login: raw.user?.login, association: raw.author_association }, cfg),
+  ledger,
+}));
 const labels = (raw.labels ?? []).map((l) => String(l.name ?? l).toLowerCase());
 const isEpic = labels.includes('sdlc:epic') || labels.includes('epic');
 
@@ -93,7 +103,10 @@ if (named.length && named.length !== existingPaths.length) {
     `${named.map((p) => `${p}${existsSync(p) ? '' : ' (missing)'}`).join(', ')}\n`);
 }
 
-const plan = fastPath(raw, { existingPaths });
+// Whether this repo has decided what it is built out of — the same question, and the same file,
+// apply-route asks before it places the project stage.
+const projectMd = existsSync('.sdlc/memory/project.md') ? readFileSync('.sdlc/memory/project.md', 'utf8') : null;
+const plan = fastPath(raw, { existingPaths, greenfield: isStub(projectMd), specPaths: cfg.spec?.paths });
 if (plan) commit(plan);
 
 setOutput('decided', 'false');

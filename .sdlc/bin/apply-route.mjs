@@ -13,13 +13,12 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { gh, setOutput, loadConfig, die } from './lib/actions.js';
-import { handOff } from './lib/handoff.js';
 import { advance } from './lib/advance.js';
 import { repair } from './lib/repair.js';
 import { validate, formatErrors } from './lib/validate.js';
-import { validateRoute, dispatchFor, loadGraph, DEFAULT_ROUTE } from './lib/flow-graph.js';
+import { validateRoute, resolveStage, loadGraph, DEFAULT_ROUTE } from './lib/flow-graph.js';
 import { effectiveGates, routeGate } from './lib/route.js';
-import { markResume } from './lib/route-io.js';
+import { markResume, dispatchStage } from './lib/route-io.js';
 import { isStub } from './lib/project.js';
 import { updateLedger } from './lib/state-io.js';
 
@@ -29,9 +28,21 @@ const cfg = await loadConfig();
 const graph = loadGraph();
 
 // --- read whatever the Router produced ---------------------------------------
+// The Router's words, posted under the pipeline's name — so quoted. Every reader of the
+// pipeline's own comments trusts a fenced block in one (a failure packet, a work order), and a
+// block the model wrote into its reasoning, or into a field name the validator echoes back,
+// must not become one.
+const quote = (text) => String(text).split('\n').map((l) => `> ${l}`).join('\n');
+
 let plan;
 if (existsSync('flow-plan.json')) {
   plan = JSON.parse(readFileSync('flow-plan.json', 'utf8'));
+  // Only the free rules say a rule decided. A model's plan comes from the job that ran an agent
+  // over issue text anyone can write, and one carrying `matched_rule` was posted as "Matched by
+  // script — no model was spent", or passed as the no-plan fallback the confidence gate lets
+  // through. The workflow says which phase wrote the file; anything it does not vouch for is a
+  // model's.
+  if (process.env.ROUTED_BY !== 'rules') delete plan?.matched_rule;
 } else {
   // Both phases declined to write one. That is not "route it the usual way": the model pass
   // was dispatched precisely because the rules would not commit, and a missing artifact after
@@ -68,7 +79,7 @@ if (!shape.ok) {
   const detail = formatErrors(shape.errors);
   process.stdout.write(`the flow plan does not validate:\n${detail}\n`);
   await gh(['issue', 'comment', String(issue), '--body',
-    `## The route could not be read\n\n${detail}\n\n` +
+    `## The route could not be read\n\n${quote(detail)}\n\n` +
     'Nothing is dispatched from a plan that does not validate. `/sdlc replan "<why>"` runs the ' +
     'Router again with your note as context, or `/sdlc approve` starts the ordinary chain.']).catch(() => {});
   await advance(issue, 'needs-human', { agent: 'router' });
@@ -135,6 +146,9 @@ await updateLedger(repo, issue, (l) => {
   return {
     ...l,
     planned_route: plan.route,
+    // Same reason as route-request: a resume point naming a stage the new route does not
+    // contain sends `/sdlc approve` to a stage this issue is no longer going through.
+    resume_at: (l.resume_at && plan.route.includes(l.resume_at)) ? l.resume_at : null,
     on_complete: plan.on_complete,
     flow_plan: {
       kind: plan.kind,
@@ -142,6 +156,9 @@ await updateLedger(repo, issue, (l) => {
       matched_rule: plan.matched_rule ?? null,
       // Additive only, and kept so the gate steps can read it. See effectiveGates().
       gates: plan.gates ?? {},
+      // What plan-strategy reads to drop a council to one pass. Never recorded, so a typo fix the
+      // rules routed as `{plan: "single"}` still paid for three agents arguing about it.
+      councils: plan.councils ?? {},
       decided_at: new Date().toISOString(),
     },
     // Deliberately no cursor.
@@ -160,13 +177,22 @@ await updateLedger(repo, issue, (l) => {
   };
 }).catch((e) => process.stdout.write(`::warning::could not record the route on the ledger: ${e.message}\n`));
 
+// The maintainer splits epics and nothing else, and an epic is known by its label: isEpic,
+// finishedEpics and wake-dependents read it, and the planner refuses a labelled issue. A route to
+// the maintainer that a rule or the model inferred — a greenfield issue pointing at the spec —
+// carried none, so until the split labelled it the issue was tracked as an ordinary one.
+if (plan.route.includes('maintainer')) {
+  await gh(['issue', 'edit', String(issue), '--add-label', 'sdlc:epic']).catch((e) =>
+    process.stdout.write(`::warning::could not label #${issue} sdlc:epic: ${String(e.message).split('\n')[0]}\n`));
+}
+
 const skipped = ['plan', 'debug', 'implement', 'review', 'qa'].filter((s) => !plan.route.includes(s));
 const body = [
   `## Route — ${plan.kind}`,
   '',
   `\`${plan.route.join('` → `')}\`` + (plan.on_complete === 'merge' ? ' → merge' : ` → ${plan.on_complete}`),
   '',
-  plan.reasoning,
+  quote(plan.reasoning),
   '',
   plan.matched_rule
     ? `_Matched by script (\`${plan.matched_rule}\`) — no model was spent on this decision._`
@@ -210,14 +236,14 @@ if (gate.gate === 'human') {
 }
 
 // --- start the first stage ----------------------------------------------------
+// Through dispatchStage like every other start, so the ledger records which stage is running —
+// a project or maintainer run started here and cancelled by `sdlc halt` came back as the planner.
 const first = plan.route[0];
-const d = dispatchFor(first, { issue }, graph);
-if (!d) die(`the graph has no way to dispatch "${first}"`);
+const target = resolveStage(first, { issue }, graph);
+if (!target) die(`the graph has no way to dispatch "${first}"`);
 
-await advance(issue, d.state, { agent: 'router' });
-await handOff(d.workflow, d.args, {
-  issue, why: `it is the first stage of this issue's route (${plan.route.join(' -> ')})`,
-});
+await dispatchStage({ repo, issue, target, agent: 'router',
+  why: `it is the first stage of this issue's route (${plan.route.join(' -> ')})` });
 setOutput('gate', 'none');
 setOutput('first', first);
 process.stdout.write(`issue #${issue}: ${plan.route.join(' -> ')} — started ${first}\n`);

@@ -7,64 +7,99 @@
 //
 // This exists as a script rather than a `workflow_run` trigger because that trigger's
 // `workflows:` list is static YAML and cannot be driven from config.
+//
+// WHICH checks gate the PR, and what green means, is lib/checks.js's decision, shared with
+// merge-pr. This file used to match required checks on `name`, and only check RUNS have one: a
+// legacy commit status carries `context`, and ci-verify reports as exactly that. A repo
+// requiring ci-verify read "no checks ran" on a PR its CI had passed — and a required check
+// that never appeared was filtered out rather than waited for, so the other checks going green
+// passed the PR without the one the repo named.
 
 import { ghJson, setOutput, loadConfig, die } from './lib/actions.js';
+import { classifyRollup, checkName, expectsCi } from './lib/checks.js';
 
 const pr = process.env.PR ?? die('PR not set');
 const cfg = await loadConfig();
-const required = cfg.verify?.required_checks ?? [];
 const timeoutMin = Number(cfg.verify?.wait_minutes ?? 30);
 const deadline = Date.now() + timeoutMin * 60_000;
 
 // A check that has not been created YET looks exactly like a check that will never exist.
 // The gate starts ci-verify and then polls; on the first poll, a second later, the rollup is
 // still empty — and concluding from that marked a PR red while its CI was still booting.
-// Absent is not the same as absent-for-good, so an empty rollup gets a grace period before it
+// Absent is not the same as absent-for-good, so a missing check gets a grace period before it
 // is allowed to mean anything.
 const EMPTY_GRACE_MS = 3 * 60_000;
 let emptySince = null;
 
-// Our own gate must not wait for itself.
-const SELF = /^(sdlc-|gate\b)/;
-
-const wanted = (c) => (required.length ? required.includes(c.name) : !SELF.test(c.name));
+// The runs ensure-ci re-ran for a flake ("id:attempt-before", comma-separated), waited for within
+// this one deadline. Until a run finishes a newer attempt its old red is still in the rollup, and
+// that is a check still running, not an answer.
+const rerun = new Map((process.env.RERUN ?? '').split(',').filter(Boolean)
+  .map((r) => { const [id, before] = r.split(':'); return [id, before ? Number(before) : null]; }));
+const runOf = (c) => String(c.detailsUrl ?? c.targetUrl ?? '').match(/\/actions\/runs\/(\d+)/)?.[1];
+async function settleReruns() {
+  for (const [id, before] of rerun) {
+    const r = await ghJson(['run', 'view', id, '--json', 'attempt,status']).catch(() => null);
+    if (r?.status === 'completed' && (before == null || r.attempt > before)) rerun.delete(id);
+  }
+}
 
 let last = '';
 while (Date.now() < deadline) {
   const { statusCheckRollup = [] } = await ghJson([
     'pr', 'view', pr, '--json', 'statusCheckRollup',
   ]);
+  const { wanted, missing, failing, pending } = classifyRollup(statusCheckRollup, cfg);
 
-  const checks = statusCheckRollup.filter(wanted);
+  const summary = wanted.map((c) => `${checkName(c)}:${c.conclusion || c.status || c.state}`).join(' ');
+  if (summary && summary !== last) { process.stdout.write(summary + '\n'); last = summary; }
 
-  if (!checks.length) {
-    // "No checks" and "no CI configured" are NOT the same thing, and treating them the same
-    // sent a PR to review and QA with nothing verified at all.
-    //
-    // What actually happened: the implementer pushed the rework as github-actions[bot], so
-    // GitHub held every `pull_request` run at `action_required` awaiting a human. A held run
-    // produces no check run, the rollup came back empty, and this read that as "this repo has
-    // no CI" — the most dangerous reading available, because it is indistinguishable from the
-    // legitimate one right up to the moment it ships something.
-    //
-    // So the config decides. A repo that says it has CI and shows none is broken, not clean.
-    const expectsCi = (cfg.verify?.mode ?? 'none') !== 'none' || required.length > 0;
-
-    if (expectsCi) {
-      emptySince ??= Date.now();
-      const waited = Date.now() - emptySince;
-      if (waited < EMPTY_GRACE_MS) {
-        process.stdout.write(`no checks reporting yet — waiting (${Math.round(waited / 1000)}s of ${EMPTY_GRACE_MS / 1000}s)\n`);
-        await new Promise((r) => setTimeout(r, 15_000));
-        continue;
-      }
+  if (failing.length && rerun.size) {
+    const running = rerun.size;
+    await settleReruns();
+    const waiting = failing.every((c) => rerun.has(runOf(c)));
+    if (waiting) {
+      process.stdout.write(`re-running: ${failing.map(checkName).join(', ')} — their red is the attempt before\n`);
+      await new Promise((r) => setTimeout(r, 15_000));
     }
+    // One that has just finished is read again: this rollup was read before it did.
+    if (waiting || rerun.size < running) continue;
+  }
 
-    if (!expectsCi) {
-      process.stdout.write('no gating checks, and verify.mode is "none" — nothing to wait for\n');
-      setOutput('conclusion', 'none');
-      setOutput('passed', 'true');
-      process.exit(0);
+  // A red check is an answer, whatever else has not reported yet.
+  if (failing.length) {
+    const names = failing.map(checkName).join(',');
+    process.stdout.write(`failing: ${names}\n`);
+    setOutput('conclusion', 'failure');
+    setOutput('passed', 'false');
+    setOutput('failed_checks', names);
+    process.exit(0);          // not an error: a red PR is a normal outcome the loop handles
+  }
+
+  // "No checks" and "no CI configured" are NOT the same thing, and treating them the same
+  // sent a PR to review and QA with nothing verified at all.
+  //
+  // What actually happened: the implementer pushed the rework as github-actions[bot], so
+  // GitHub held every `pull_request` run at `action_required` awaiting a human. A held run
+  // produces no check run, the rollup came back empty, and this read that as "this repo has
+  // no CI" — the most dangerous reading available, because it is indistinguishable from the
+  // legitimate one right up to the moment it ships something.
+  //
+  // So the config decides. A repo that says it has CI and shows none is broken, not clean.
+  if (!wanted.length && !expectsCi(cfg)) {
+    process.stdout.write('no gating checks, and verify.mode is "none" — nothing to wait for\n');
+    setOutput('conclusion', 'none');
+    setOutput('passed', 'true');
+    process.exit(0);
+  }
+
+  if (missing.length) {
+    emptySince ??= Date.now();
+    const waited = Date.now() - emptySince;
+    if (waited < EMPTY_GRACE_MS) {
+      process.stdout.write(`not reporting yet: ${missing.join(', ')} — waiting (${Math.round(waited / 1000)}s of ${EMPTY_GRACE_MS / 1000}s)\n`);
+      await new Promise((r) => setTimeout(r, 15_000));
+      continue;
     }
 
     // Name the likeliest cause, because an empty rollup says nothing about why it is empty.
@@ -73,7 +108,7 @@ while (Date.now() < deadline) {
       .catch(() => []);
 
     process.stdout.write(
-      `verify.mode is "${cfg.verify?.mode}" but this PR has no gating checks at all.\n` +
+      `verify.mode is "${cfg.verify?.mode}" but ${missing.join(', ')} never reported on this PR.\n` +
       (held.length
         ? `${held.length} run(s) are held at "action_required" — GitHub is waiting for a human to ` +
           'approve workflows on this PR. That is what it looks like when the pipeline pushes as ' +
@@ -84,47 +119,14 @@ while (Date.now() < deadline) {
 
     setOutput('conclusion', 'failure');
     setOutput('passed', 'false');
-    setOutput('failed_checks', 'none ran');
+    if (wanted.length) setOutput('failed_checks', `never reported: ${missing.join(',')}`);
+    else setOutput('failed_checks', 'none ran');
     process.exit(0);          // a normal red outcome, handled by the loop — not a crash
   }
+  emptySince = null;
 
-  // Two shapes arrive in one rollup and they are NOT interchangeable.
-  //
-  // A check run reports `status` + `conclusion`; a legacy commit status reports `state` alone.
-  // This used to call anything with a `state` finished — and a legacy status says
-  // `state: "PENDING"` while it is still running. A pending status was therefore neither
-  // failed nor pending, so the loop concluded "all checks passed" on CI that had not finished.
-  //
-  // That is not a stall, it is a green light on unverified code, and our own ci-verify posts
-  // exactly that pending status before it starts work.
-  const TERMINAL_STATES = new Set(['SUCCESS', 'FAILURE', 'ERROR']);
-  const FAILED_CONCLUSIONS = new Set(['FAILURE', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);
-  const FAILED_STATES = new Set(['FAILURE', 'ERROR']);
-
-  const isCheckRun = (c) => c.status !== undefined;
-  const done = (c) => (isCheckRun(c)
-    ? c.status === 'COMPLETED' && c.conclusion != null
-    // Anything unrecognised counts as NOT done: it keeps waiting, and the timeout catches a
-    // state that never resolves. Guessing "finished" is how this failed in the first place.
-    : TERMINAL_STATES.has(String(c.state ?? '').toUpperCase()));
-
-  const failed = checks.filter((c) => (isCheckRun(c)
-    ? FAILED_CONCLUSIONS.has(String(c.conclusion ?? '').toUpperCase())
-    : FAILED_STATES.has(String(c.state ?? '').toUpperCase())));
-  const pending = checks.filter((c) => !done(c));
-
-  const summary = checks.map((c) => `${c.name}:${c.conclusion ?? c.status ?? c.state}`).join(' ');
-  if (summary !== last) { process.stdout.write(summary + '\n'); last = summary; }
-
-  if (failed.length) {
-    process.stdout.write(`failing: ${failed.map((c) => c.name).join(', ')}\n`);
-    setOutput('conclusion', 'failure');
-    setOutput('passed', 'false');
-    setOutput('failed_checks', failed.map((c) => c.name).join(','));
-    process.exit(0);          // not an error: a red PR is a normal outcome the loop handles
-  }
   if (!pending.length) {
-    process.stdout.write(`all ${checks.length} check(s) passed\n`);
+    process.stdout.write(`all ${wanted.length} check(s) passed\n`);
     setOutput('conclusion', 'success');
     setOutput('passed', 'true');
     process.exit(0);

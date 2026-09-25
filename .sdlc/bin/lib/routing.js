@@ -4,6 +4,8 @@
 // policy choice a project will want to change, which is why they read from config rather
 // than being spelled out in a workflow condition.
 
+import { lastJsonBlock } from './actions.js';
+
 /**
  * A bug is a question about what a running system is actually doing, and it is answered by
  * reproducing it. A feature is a design problem. Sending both to the same agent is why a
@@ -112,6 +114,19 @@ export function mergeReviewFindings(correctness = {}, design = {}) {
     dropped,
     verdict: blocking.length ? 'request-changes' : 'approve',
     blocking_count: blocking.length,
+    // What route-review needs and could not get. The council posts a comment, never a review,
+    // and route-review read both of these from PR reviews — so in council mode an approval's
+    // major findings were never filed, and every rejection was recorded as being about nothing,
+    // which meant a criterion rejected ten rounds running never reached root-cause. Criterion
+    // ids only: a file path is where a finding is, not what it is about, and two different bugs
+    // in one file are not the same rejection twice.
+    blocking_criteria: [...new Set(blocking.flatMap((f) =>
+      criteriaOf(f.ac ?? f.claim).filter((c) => /^ac-\d+$/.test(c))))].sort(),
+    unresolved: asFollowUps(kept.filter((f) => f.severity !== 'blocking').map((f) => ({
+      title: f.claim,
+      detail: [f.claim, f.file && `\`${f.file}${f.line ? `:${f.line}` : ''}\``,
+        f.evidence && `Evidence: ${f.evidence}`, f.fix && `Fix: ${f.fix}`].filter(Boolean).join('\n\n'),
+    }))),
   };
 }
 
@@ -126,14 +141,46 @@ const rank = (s) => ({ blocking: 0, major: 1, minor: 2 }[s] ?? 3);
  *
  * Two shapes to read, because there are two review modes:
  *   council — `declared` carries the merged verdict, computed from cross-verified findings.
- *   single  — the agent posted a formal review, so GitHub holds the verdict, not us.
+ *   single  — `reviews` carries the reviewer's review/review.md, which route-review reads
+ *             through REVIEW; the verdict is the one it wrote there.
  *
  * Returns null when there is nothing to read at all. That is NOT an approval: an agent that
  * finished without reviewing is the absent-value bug this pipeline keeps producing, and the
  * caller escalates it to a human instead of letting silence merge code.
  */
+/**
+ * A verdict in the one spelling the pipeline routes on, or null.
+ *
+ * The contract spelled it `request_changes` while this matched `request-changes` exactly, so a
+ * reviewer following its own pack read as having said nothing: "The review stage finished
+ * without posting a review", which was false, and a person woken for a routine rework. Models
+ * write "Approved", "changes requested", "reject"; each has one meaning, so each is read as it.
+ *
+ * `comment` is its own outcome — the reviewer found something it cannot judge without a
+ * person — and never an approval.
+ *
+ * @returns {'approve'|'request-changes'|'comment'|null}
+ */
+export function normaliseVerdict(v) {
+  const s = String(v ?? '').trim().toLowerCase().replace(/[_\s]+/g, '-');
+  if (s === 'approve' || s === 'approved') return 'approve';
+  if (['request-changes', 'changes-requested', 'reject', 'rejected'].includes(s)) return 'request-changes';
+  if (s === 'comment') return 'comment';
+  return null;
+}
+
+/**
+ * The block a review states its verdict in: the LAST fenced json block that carries one.
+ *
+ * The first block was taken, so a review that quoted a package.json or a work order before its
+ * verdict read as no verdict at all. What an agent decides is the last thing it writes; what
+ * comes before it is evidence.
+ */
+export const verdictBlock = (body) => lastJsonBlock(body, (o) => 'verdict' in o);
+
 export function reviewVerdict({ declared = null, reviews = [] } = {}) {
-  if (declared === 'approve' || declared === 'request-changes') return declared;
+  const said = normaliseVerdict(declared);
+  if (said) return said;
 
   // Latest wins deliberately: a human approving after the bot requested changes is exactly
   // how someone overrides a finding they disagree with, and it must not be outvoted by an
@@ -151,13 +198,8 @@ export function reviewVerdict({ declared = null, reviews = [] } = {}) {
   //
   // The state is the model's choice of button. The block is its stated verdict, in the same
   // fenced-JSON form every other agent here uses, and it is what the orchestrator acts on.
-  const block = String(latest.body ?? '').match(/```json\s*\n([\s\S]*?)\n```/);
-  if (block) {
-    try {
-      const v = JSON.parse(block[1])?.verdict;
-      if (v === 'approve' || v === 'request-changes') return v;
-    } catch { /* not the block we are looking for */ }
-  }
+  const stated = normaliseVerdict(verdictBlock(latest.body)?.verdict);
+  if (stated) return stated;
 
   // No stated verdict. CHANGES_REQUESTED still stops the PR — that one is unambiguous
   // whatever else is missing — but a bare comment is NOT an approval: it is a reviewer that
@@ -248,27 +290,39 @@ export function unresolvedFromProse(body = '') {
 export function unresolvedFindings(reviews = []) {
   const latest = [...reviews].filter(Boolean).pop();
   const body = String(latest?.body ?? '');
-  const block = body.match(/```json\s*\n([\s\S]*?)\n```/);
 
-  let raw;
-  try { raw = JSON.parse(block?.[1] ?? '{}')?.unresolved; } catch { raw = null; }
+  let raw = verdictBlock(body)?.unresolved;
   // The reviewer said nothing structured, so read what it wrote. A finding recorded in prose
   // that nobody actions is a finding that was not made.
   if (!Array.isArray(raw)) raw = unresolvedFromProse(body);
+  return asFollowUps(raw);
+}
 
-  // Repair the cosmetic, refuse the false: an over-long title is trimmed, an entry with no
-  // title at all is dropped. A ticket called "undefined" is worse than no ticket, because
-  // somebody has to open it to find that out.
-  return raw
-    .map((f) => ({
-      title: String(f?.title ?? '').trim().slice(0, 120),
-      detail: String(f?.detail ?? f?.fix ?? '').trim().slice(0, 4000),
-    }))
-    .filter((f) => f.title)
-    // Capped. A reviewer that decides to emit forty of these is a reviewer misusing the
-    // field, and forty new issues is worse than none — it buries the backlog it is meant
-    // to protect.
-    .slice(0, 10);
+// Refuse the false: an entry with no title at all is dropped. A ticket called "undefined" is
+// worse than no ticket, because somebody has to open it to find that out. Length is not cut
+// here; gh() meets GitHub's limit on the issue body these are filed into.
+const asFollowUps = (raw) => raw
+  .map((f) => ({
+    title: String(f?.title ?? '').trim(),
+    detail: String(f?.detail ?? f?.fix ?? '').trim(),
+  }))
+  // Every one is kept. This was cut to the first ten, against forty separate issues burying the
+  // backlog — but they are filed as ONE follow-up issue now, so a cap only dropped findings the
+  // reviewer made, in silence.
+  .filter((f) => f.title);
+
+/**
+ * What one blocking entry is about, as the keys a repeat is counted on.
+ *
+ * Kept verbatim, "AC-3: total is wrong" and "AC-3 (rounding)" were two different criteria, so
+ * one criterion rejected round after round never counted as a repeat and root-cause never got
+ * its turn. The acceptance-criterion ids an entry names are what it is about; an entry naming
+ * none (a file path) is kept whole. Lower-cased, as every recorded review_history entry is —
+ * changing the case would restart every streak already in flight.
+ */
+export function criteriaOf(entry) {
+  const text = String(entry?.id ?? entry ?? '').trim();
+  return (text.match(/\bAC-\d+\b/gi) ?? (text ? [text] : [])).map((c) => c.toLowerCase());
 }
 
 /**
@@ -279,10 +333,8 @@ export function unresolvedFindings(reviews = []) {
 export function rejectionCriteria(reviews = []) {
   const latest = [...reviews].filter(Boolean).pop();
   const body = String(latest?.body ?? '');
-  const block = body.match(/```json\s*\n([\s\S]*?)\n```/);
 
-  let about = [];
-  try { about = JSON.parse(block?.[1] ?? '{}')?.blocking ?? []; } catch { about = []; }
+  let about = verdictBlock(body)?.blocking ?? [];
   if (!Array.isArray(about) || !about.length) {
     // The reviewer did not say. Read the criteria its BLOCKING prose names — everything after
     // the non-blocking heading is explicitly not what held the merge, and counting it would
@@ -294,7 +346,7 @@ export function rejectionCriteria(reviews = []) {
     const head = body.split(/^#{1,6}\s*(?:non[-\s]?blocking|nits?|minor|optional|suggestions?|scope)\b/im)[0];
     about = [...head.matchAll(/\bAC-\d+\b/g)].map((m) => m[0]);
   }
-  return [...new Set(about.map((a) => String(a?.id ?? a).trim().toLowerCase()).filter(Boolean))].sort();
+  return [...new Set(about.flatMap(criteriaOf))].sort();
 }
 
 /**

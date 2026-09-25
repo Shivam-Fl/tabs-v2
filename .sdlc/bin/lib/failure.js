@@ -11,10 +11,15 @@
 // the RAW error and its own full work order, and keep a record so the second identical
 // failure is answered differently from the first.
 //
-// Pure functions. The decision this file makes is the one that bounds an unattended retry
-// loop, so it is testable without a network.
+// Pure functions, except parkForCooldown at the bottom. The decision this file makes is the
+// one that bounds an unattended retry loop, so it is testable without a network.
 
 import { createHash } from 'node:crypto';
+import { gh } from './actions.js';
+import { updateLedger } from './state-io.js';
+import { markResume } from './route-io.js';
+import { advance } from './advance.js';
+import { resolveStage, retryHint } from './flow-graph.js';
 
 /**
  * Strip everything that changes between two runs of the SAME mistake.
@@ -154,4 +159,116 @@ export function recordFailure(ledger, entry, { limit = 50 } = {}) {
     ...ledger,
     failure_history: [...(ledger.failure_history ?? []), entry].slice(-limit),
   };
+}
+
+const trailing = (list = [], pred) => {
+  let n = 0;
+  for (let i = list.length - 1; i >= 0 && pred(list[i] ?? {}); i--) n++;
+  return n;
+};
+
+/**
+ * How many times in a row this stage's model run has just failed before producing anything.
+ *
+ * Counted off failure_history rather than kept as a `runtime_retries` counter, because that
+ * counter was only ever incremented: an outage last week spent this week's cooldowns. Any other
+ * failure of this stage, or a failure of another stage (which means this one got past it),
+ * ends the run of them.
+ */
+export function runtimeTries(history = [], stage) {
+  return trailing(history, (h) => h.stage === stage && h.error_type === 'agent-runtime');
+}
+
+/** How many times in a row the triage has answered this stage's failure with "wait". */
+export function waitTries(triageHistory = [], stage) {
+  return trailing(triageHistory, (h) => h.stage === stage && h.verdict === 'wait');
+}
+
+/**
+ * The stage a failure of `stage` waits on, stops at, or re-enters: `merge` when QA passed on the
+ * PR's current head and only the merge after it failed, and `stage` otherwise.
+ *
+ * Re-entering QA re-runs a twenty-to-seventy-minute browser session on a head it has already
+ * passed, and a flaky finding the second time turns a passed PR into a root-cause. Waiting or
+ * stopping at needs-human was the same thing slower: from there qa-pass is reachable only through
+ * a QA run. The verdict is on the ledger, bound to the commit it tested; while the head is still
+ * that commit, only the merge is at stake.
+ */
+export async function mergeOnlyStage(ledger, stage, pr) {
+  if (stage !== 'qa' || !pr || ledger?.state !== 'qa-pass' || !ledger?.qa?.sha) return stage;
+  const head = await gh(['pr', 'view', String(pr), '--json', 'headRefOid', '--jq', '.headRefOid']).catch(() => '');
+  return head === ledger.qa.sha ? 'merge' : stage;
+}
+
+/**
+ * Park a stage to wait out an outage, and have the watchdog start it again afterwards.
+ *
+ * An outage is a WAIT, not a stop. Retrying at once proves the limit is still there and burns
+ * an attempt; stopping for a person means that at 2am the pipeline is finished for the night
+ * over something that clears itself in twenty minutes. Backing off each round, because a limit
+ * that is still there after one cooldown will not have moved in another twenty minutes.
+ *
+ * One function for the three places that see an outage — the failure handler (the model run
+ * died), the triage verdict `wait`, and the triage agent itself not running — so a cooldown
+ * means the same thing whoever noticed it.
+ *
+ * @param {number} tries  cooldowns this stage has already waited through in this outage
+ * @returns {Promise<{minutes: number, at: Date}|{halted: true}|null>} null when the cooldowns are
+ *          used up, or the wait could not be recorded; the caller then stops for a person instead.
+ *          `halted` when a person stopped the issue: nothing was parked, and nothing is to be done
+ */
+export async function parkForCooldown(repo, issue, stage, tries, { maxRetries = 4, agent = 'self-heal', why } = {}) {
+  if (tries >= maxRetries) return null;
+  const minutes = Math.min(20 * 2 ** tries, 120);
+  const at = new Date(Date.now() + minutes * 60_000);
+
+  // Not `.catch(() => {})`. A cooldown that was announced and never written is an issue parked
+  // at needs-human with nothing to wake it — it reads as scheduled and is abandoned.
+  //
+  // And not over a stop. A person who ran `/sdlc stop`, or closed the issue, while a triage was
+  // reading the log was told "the watchdog starts review again after …" — a restart the sweep
+  // would then refuse, announced on an issue someone had just stopped.
+  let halted = null;
+  try {
+    await updateLedger(repo, Number(issue), (l) => {
+      halted = l?.halted ?? null;
+      return l && !halted ? {
+        ...l, retry_after: at.toISOString(), retry_stage: stage, parked_at: new Date().toISOString(),
+      } : null;
+    });
+  } catch (e) {
+    process.stdout.write(`::warning::issue #${issue}: could not record the cooldown: ${e.message}\n`);
+    return null;
+  }
+  if (halted) {
+    process.stdout.write(`issue #${issue}: halted by @${halted.by} — not parking \`${stage}\` for a cooldown\n`);
+    return { halted: true };
+  }
+
+  // needs-human frees the in-flight slot, which is what lets everything else keep moving while
+  // this one waits. The watchdog is what brings it back. Not a merge (mergeOnlyStage): it waits
+  // at qa-pass, as merge-pr's own "not yet" does, because needs-human leads back to qa-pass only
+  // through another QA run. resume-cooled-down re-enters a merge from there.
+  if (stage !== 'merge') {
+    await markResume(repo, issue, resolveStage(stage, { issue })?.stage ?? stage, 'retry');
+    await advance(issue, 'needs-human', { agent });
+  }
+  await gh(['issue', 'comment', String(issue), '--body',
+    `Parked for ${minutes} minutes: ${why}.\n\n` +
+    `The watchdog starts \`${stage}\` again after ${at.toISOString()} — cooldown ${tries + 1} of ` +
+    `${maxRetries}. ${stage === 'merge' ? 'QA\'s pass stands; the issue stays at `qa-pass`.'
+      : 'Nothing is lost; the slot is free for other issues meanwhile.'} ` +
+    `${retryHint(stage)} starts it sooner.`]).catch(() => {});
+  // A timed wake-up, because the cron is not one. GitHub delays and drops scheduled runs: a
+  // 20-minute cooldown was resumed after 196 minutes. On a public repository runner minutes are
+  // free, so a dispatched run waits the cooldown out and resumes on time; on a private one that
+  // wait would bill every minute, and the watchdog's cron is left to do it.
+  const isPublic = await gh(['api', `repos/${repo}`, '--jq', '.private'])
+    .then((p) => p.trim() === 'false').catch(() => false);
+  if (isPublic) {
+    await gh(['workflow', 'run', 'sdlc-cooldown.yml', '-f', `issue=${issue}`, '-f', `minutes=${minutes}`])
+      .catch((e) => process.stdout.write(`::warning::issue #${issue}: could not start the timed wake-up (the watchdog's cron still will): ${e.message}\n`));
+  }
+  process.stdout.write(`issue #${issue}: parked ${minutes}m before \`${stage}\` runs again\n`);
+  return { minutes, at };
 }

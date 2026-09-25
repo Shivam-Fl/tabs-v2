@@ -7,11 +7,20 @@ on:
   schedule: [{ cron: "*/15 * * * *" }]
   workflow_dispatch:
 
+# One sweep at a time, and a running one is never cancelled. advance() dispatches a sweep whenever
+# a slot frees, on top of the cron, and two overlapping sweeps reported every stall twice. GitHub
+# keeps one waiting run per group, the newest, which sees everything an older waiting one would;
+# advance() does not dispatch at all while one is waiting.
+concurrency:
+  group: sdlc-watchdog
+  cancel-in-progress: false
+
 permissions:
   contents: write
   issues: write
   actions: write          # it dispatches intake to start a queued issue; without this the
                           # wake marks an issue in flight and then cannot start it
+  pull-requests: read     # reconcile-merged asks each ledger's PR whether it already merged
 
 jobs:
   sweep:
@@ -22,19 +31,14 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020   # v4
         with:
           node-version: 22
-          # Only cache when there is a lockfile. Without this, setup-node fails outright on a
-          # zero-dependency project or any non-Node repo, before a single step has run.
-          cache: ${{ hashFiles('**/package-lock.json') != '' && 'npm' || '' }}
       - name: Kill switch
         run: node .sdlc/bin/sdlc-ctl.mjs guard
-      # Works in a repo with no package.json: install the repo's own deps when there is a
-      # manifest, then make sure the framework's single dependency is available either way.
+        env: { SDLC_ENABLED: "${{ vars.SDLC_ENABLED }}" }
+      # The framework's own dependency is vendored, so this only checks it loads. No product
+      # install: `npm ci` in the root runs every dependency's install script with this job's
+      # contents, issues and actions write — on a schedule, every fifteen minutes.
       - name: Bootstrap
-        run: |
-          if [ -f package-lock.json ]; then npm ci
-          elif [ -f package.json ]; then npm install --no-audit --no-fund
-          fi
-          node .sdlc/bin/ensure-deps.mjs
+        run: node .sdlc/bin/ensure-deps.mjs
 
       - name: Sweep every open ledger
         id: sweep
@@ -46,6 +50,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT: ${{ steps.sweep.outputs.report }}
         run: node .sdlc/bin/watchdog-report.mjs
+
+      # A merge whose follow-up was cancelled or crashed left the ledger at qa-pass and the issue
+      # open, with nothing that would ever record it. Before the top-up below, so the issues
+      # that were waiting on it can start in this same sweep.
+      - name: Record merges nothing recorded
+        if: always()
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: node .sdlc/bin/reconcile-merged.mjs
 
       # Re-offer the start queue. This is the only thing in the framework that runs on a
       # clock, so it is the only thing that can notice a slot freed without a merge.

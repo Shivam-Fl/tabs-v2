@@ -38,6 +38,11 @@ const cycleFrom = (state, extra = []) => [
   ...CYCLE.filter((s) => s !== state), ...extra, ...ESCAPES,
 ];
 
+// `budget-exceeded` is reachable from every state a counter can be spent in, which is all of
+// them before a PR exists too. project, plan, debug and root-cause all spend the plan counter
+// at `planning`, and with no edge here the cap could not be recorded: the ledger stayed at
+// planning under an in-flight label that held a slot, and every watchdog sweep re-posted
+// "Budget exceeded" and then crashed on the refused move, dropping every report after it.
 const LEGAL = {
   // `qa` as well as `planning`: an AUDIT route is `["qa"]` alone — nothing is planned because
   // nothing is being built — and without this edge that route could not start at all.
@@ -45,8 +50,12 @@ const LEGAL = {
   // `implementing` is deliberately NOT here. The implementer takes a validated work order and
   // nothing else, so an issue reaching it straight from triage would dispatch an agent whose
   // first act is to look for a file nobody wrote.
-  'triage':          ['planning', 'qa', 'needs-human', 'blocked'],
-  'planning':        ['implementing', 'needs-human', 'blocked'],
+  'triage':          ['planning', 'qa', 'needs-human', 'blocked', 'budget-exceeded'],
+  // `qa` here too, for the same audit route: intake moves EVERY issue to planning before the
+  // route's first stage is dispatched, so the triage -> qa edge above is one the audit never
+  // takes. Without this QA's claim was label-only and its verdict threw `planning -> qa-pass`.
+  // The verdict guard is untouched — qa-pass still only follows qa.
+  'planning':        ['implementing', 'qa', 'needs-human', 'blocked', 'budget-exceeded'],
 
   ...Object.fromEntries(CYCLE.map((s) => [s, cycleFrom(s)])),
   // Only a QA run may produce a QA verdict.
@@ -60,10 +69,17 @@ const LEGAL = {
   // `merged` still requires qa-pass, and a QA verdict still requires a QA run.
   'qa-pass':         cycleFrom('qa-pass', ['merged', 'qa', 'done']),
 
-  'merged':          ['done', 'needs-human'],
-  'done':            [],
-  'blocked':         ['triage', 'planning', 'needs-human'],
-  'needs-human':     STATES.filter((s) => s !== 'needs-human'), // a human may route it anywhere
+  // `triage` from both: a person REOPENED a shipped issue, and intake starts it over. With no
+  // way out of `done` a reopened issue's next stage claim warned, its verdict threw, and the
+  // issue could never record an outcome again.
+  'merged':          ['done', 'needs-human', 'triage'],
+  'done':            ['triage', 'needs-human'],
+  'blocked':         ['triage', 'planning', 'needs-human', 'budget-exceeded'],
+  // A human may route it anywhere EXCEPT to a verdict. `/sdlc stop` parks an issue here while a
+  // QA run may still be in flight, and when this allowed `qa-pass` that run recorded its pass
+  // straight over the stop and merge-pr merged it. A verdict follows a QA run and nothing else;
+  // a PR merged by hand is recorded by `reconcile`, which does not need this edge.
+  'needs-human':     STATES.filter((s) => !['needs-human', 'qa-pass', 'qa-fail'].includes(s)),
   'budget-exceeded': ['needs-human'],
 };
 
@@ -80,7 +96,20 @@ export function newLedger(issue, now = new Date()) {
   // rather than only how old the lock is. A cancelled job never reaches its unlock step.
   lock_run: null,
     attempts: Object.fromEntries(STAGES.map((s) => [s, 0])),
-    budget: { minutes: 0, cap_minutes: 120 },
+    // The last attempt spent, as {counter, n, run}: which Actions run spent it. A stage spends
+    // its attempt before it can fail, so the failure handler asks this whether the run that
+    // failed is already counted rather than guessing "one more than the counter".
+    attempt_run: null,
+    // `/sdlc stop`, as {by, at, why}. While set, nothing but a human moves this issue anywhere
+    // except needs-human or blocked — see transition().
+    halted: null,
+    // Why the next implement or root-cause run was dispatched ({stage, rework, qa_run, from, pr,
+    // requested_at_head, at}), written by dispatchStage. It lived only in the dispatch inputs,
+    // so every re-entry — a retry, a cooldown resume, an approve — started without it.
+    pending: null,
+    // The plan being built, in full (lib/work-order.js). The ledger is its source of truth,
+    // not whichever comment on the issue looks most like one.
+    work_order: null,
     touch_paths: [],
     acceptance: [],
     // Which stages this issue actually needs, decided once by the Router. Empty means nobody
@@ -121,6 +150,19 @@ const stamp = (l, now, agent, action) => ({
 /** Legal-transition check. An illegal transition is a bug in a workflow, not a valid state. */
 export function transition(ledger, to, { agent = 'system', now = new Date() } = {}) {
   if (!STATES.includes(to)) return { ok: false, reason: `unknown state "${to}"` };
+
+  // A halted issue refuses every move but a human's, and the two that park it.
+  //
+  // `/sdlc stop` used to move the issue to needs-human and nothing else, so the stage already
+  // running simply carried on: its next claim was legal from needs-human, a QA run recorded
+  // qa-pass over the stop, and the PR merged. Every stage hand-off, claim and verdict writes
+  // through this function, so refusing here stops all of them at their next ledger write —
+  // including a same-state claim, which is the running stage re-asserting itself. The reason
+  // always starts "halted by @", which advance() treats as fatal for any state.
+  const h = ledger.halted;
+  if (h && agent !== 'human' && to !== 'needs-human' && to !== 'blocked') {
+    return { ok: false, halted: true, reason: `halted by @${h.by} at ${h.at}${h.why ? ` — ${h.why}` : ''}` };
+  }
 
   // Landing on the state you are already in is a no-op, not an error. Re-running a stage is
   // ordinary — a retry, a reopened issue, a replayed workflow — and failing there turns a
@@ -197,31 +239,51 @@ export function isLockStale(ledger, now = new Date()) {
  * Increments on DISPATCH, not on success. An agent that fails to even start still consumed
  * an attempt — otherwise a crash loop is free and runs forever.
  */
-export function bumpAttempt(ledger, stage, { agent = 'system', now = new Date() } = {}) {
+export function bumpAttempt(ledger, stage, { agent = 'system', now = new Date(), runId = null } = {}) {
   if (!STAGES.includes(stage)) return { ok: false, reason: `unknown stage "${stage}"` };
-  const next = { ...ledger.attempts, [stage]: (ledger.attempts[stage] ?? 0) + 1 };
+  const next = { ...ledger.attempts, [stage]: (ledger.attempts?.[stage] ?? 0) + 1 };
+  const attempt_run = { counter: stage, n: next[stage], run: runId ? String(runId) : null };
   return {
     ok: true,
-    ledger: stamp({ ...ledger, attempts: next }, now, agent, `${stage} attempt ${next[stage]}`),
+    ledger: stamp({ ...ledger, attempts: next, attempt_run }, now, agent, `${stage} attempt ${next[stage]}`),
   };
 }
 
-/** @returns {{ok: true} | {ok: false, reason: string, terminal: string}} */
+/**
+ * Which attempt of `counter` a failure of run `runId` was.
+ *
+ * Every counted stage spends its attempt as its first step, so a run that failed after that is
+ * already on the counter: it IS attempt n, not n + 1. Counting it again recorded a first plan
+ * failure as "plan attempt 2", and the triage read that as a repeat and escalated it. Only a run
+ * that never spent one — it died before its attempt step, or it is the gate, which spends none —
+ * is the one after the counter.
+ */
+export function failedAttempt(ledger, counter, runId) {
+  const spent = ledger?.attempt_run;
+  if (spent && runId && spent.counter === counter && String(spent.run) === String(runId)) return spent.n;
+  return (ledger?.attempts?.[counter] ?? 0) + 1;
+}
+
+/**
+ * @returns {{ok: true} | {ok: false, reason: string, terminal: string}}
+ *
+ * Attempts only. There was a wall-clock clause, compared against `budget.minutes` — a counter
+ * no code ever incremented, so the documented minute cap could never trip and only made a
+ * bound look present that was not. The attempt caps are the bound; an old ledger still
+ * carrying `budget` reads without error because nothing looks at it.
+ */
 export function checkBudget(ledger, limits = {}) {
   const maxAttempts = limits.attempts ?? 10;
-  const capMinutes = limits.minutes ?? ledger.budget?.cap_minutes ?? 120;
 
   for (const [stage, n] of Object.entries(ledger.attempts ?? {})) {
     if (n > maxAttempts) {
       return {
         ok: false,
         reason: `${stage} exceeded ${maxAttempts} attempts (at ${n})`,
+        counter: stage,
         terminal: 'budget-exceeded',
       };
     }
-  }
-  if ((ledger.budget?.minutes ?? 0) > capMinutes) {
-    return { ok: false, reason: `exceeded ${capMinutes} minute budget`, terminal: 'budget-exceeded' };
   }
   return { ok: true };
 }
@@ -254,4 +316,24 @@ function globToRegExp(glob) {
  */
 export function pathsCollide(a = [], b = []) {
   return a.some((x) => b.some((y) => x === y || globToRegExp(x).test(y) || globToRegExp(y).test(x)));
+}
+
+/**
+ * A person's `/sdlc approve` of the merge — when it approved the QA result the ledger holds now.
+ *
+ * It was HUMAN_APPROVED, an env var only run-command set, because run-command ran merge-pr
+ * itself: in sdlc-loop's command job, outside the merge-<pr> concurrency group the judge merges
+ * in, so a person's approve and the autonomous merge could run at once. The approve dispatches
+ * the judge's merge step now, and the approval has to travel with it, so run-command writes it
+ * here. Bound to the QA run and the commit it passed: a newer QA result is a new decision.
+ *
+ * An approval given with no QA result on record still counts, bound to that absence, so merge-pr
+ * gets past its quiet gate to the refusal a person should hear: nothing says which commit passed.
+ *
+ * @returns {{by: string, at: string, sha: string|null, qa_run: string|null} | null}
+ */
+export function mergeApproval(ledger) {
+  const a = ledger?.merge_approval;
+  const qa = ledger?.qa;
+  return a && (a.sha ?? null) === (qa?.sha ?? null) && String(a.qa_run ?? '') === String(qa?.run_id ?? '') ? a : null;
 }

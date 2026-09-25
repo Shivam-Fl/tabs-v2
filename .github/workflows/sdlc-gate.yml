@@ -12,6 +12,10 @@ on:
   workflow_dispatch:
     inputs:
       pr: { required: true, type: string }
+      # A triage that called a red check transient, or a cooldown ending on one: re-run the
+      # checks that failed on this head before waiting. Without it the gate re-read the same red
+      # rollup, and a flake could only be answered by sending the implementer a `fix:` rework.
+      rerun_failed: { required: false, type: string }
 
 concurrency:
   group: gate-${{ github.event.pull_request.number || inputs.pr }}
@@ -42,47 +46,63 @@ jobs:
       PR: ${{ github.event.pull_request.number || inputs.pr }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      # The framework, from the default branch, and never the PR's tree. On a `pull_request`
+      # event — a person pushing to a pipeline branch — checkout defaults to the PR's merge ref,
+      # so check-diff-forbidden, ensure-ci, gate-outcome and dispatch-fix ran from the branch
+      # with this job's write token: a guard the agent had edited approved its own change. The
+      # PR is read through the API only.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020   # v4
         with:
           node-version: 22
-          # Only cache when there is a lockfile. Without this, setup-node fails outright on a
-          # zero-dependency project or any non-Node repo, before a single step has run.
-          cache: ${{ hashFiles('**/package-lock.json') != '' && 'npm' || '' }}
 
       - name: Kill switch
         run: node .sdlc/bin/sdlc-ctl.mjs guard
+        env: { SDLC_ENABLED: "${{ vars.SDLC_ENABLED }}" }
 
+      # The framework only. This used to `npm ci` the product first — every dependency's
+      # lifecycle scripts, in a job holding contents and actions write — and nothing here runs
+      # the product: the gate asks GitHub about the PR, it does not build it.
       - name: Bootstrap
-        run: |
-          if [ -f package-lock.json ]; then npm ci
-          elif [ -f package.json ]; then npm install --no-audit --no-fund
-          fi
-          node .sdlc/bin/ensure-deps.mjs
+        run: node .sdlc/bin/ensure-deps.mjs
 
       # Again here, against the PR's own diff as GitHub reports it. The implementer checked its
       # branch before opening the PR; this catches anything pushed after that, from any source,
       # and it is the diff a merge would actually apply.
       - name: Refuse a PR that touches reserved paths
+        id: reserved
         run: node .sdlc/bin/check-diff-forbidden.mjs
 
-      # Before waiting: if our own CI is configured but nothing is reporting on this PR, start
-      # it. A bot-pushed commit does not get a `pull_request` run that actually executes — it
-      # gets one held at `action_required` — so waiting alone waits forever, or reads the empty
-      # rollup as green.
-      - name: Start our CI if nothing is gating this PR
+      # Before waiting: start the CI that gates this PR — ours when it is configured and nothing
+      # is reporting, and under verify.mode existing/both the repo's own dispatchable
+      # pull_request workflows. A bot-pushed commit does not get a `pull_request` run that
+      # actually executes — it gets one held at `action_required` — so waiting alone waits
+      # forever, or reads the empty rollup as green.
+      - name: Start the CI that gates this PR
+        id: ci
+        env:
+          RERUN_FAILED: ${{ inputs.rerun_failed }}
         run: node .sdlc/bin/ensure-ci.mjs
 
+      # The runs a flake re-run started, which the wait holds on until they finish: their old red
+      # stays in the rollup until then.
       - name: Wait for the checks that gate this PR
         id: checks
+        env:
+          RERUN: ${{ steps.ci.outputs.rerun }}
         run: node .sdlc/bin/wait-for-checks.mjs
 
       # Records the result AND starts whatever this issue's route asks for next — review on
       # most tickets, QA directly on the ones that do not need one. The successor used to be a
       # filename in the step below, which meant the route was a property of this file rather
       # than of the ticket.
+      #
+      # Every conclusion, `none` included: it was skipped on `none`, and with nothing else
+      # handing off, a repo with no CI stopped every PR here behind a green run.
       - name: Record the outcome and start the next stage
-        if: steps.checks.outputs.conclusion != 'none'
         env:
           CONCLUSION: ${{ steps.checks.outputs.conclusion }}
           FAILED_CHECKS: ${{ steps.checks.outputs.failed_checks }}
@@ -100,6 +120,22 @@ jobs:
         env:
           STAGE: ci
           FAILED_CHECKS: ${{ steps.checks.outputs.failed_checks }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node .sdlc/bin/dispatch-fix.mjs
+
+      # Anything else that stops the gate — a reserved-path refusal, a crash in ensure-ci, a
+      # poll that hit an API error, a ledger that lost every race — used to end the job red and
+      # tell nobody: the implementer had already unlocked, the issue read `sdlc:implementing`,
+      # and the first sign was the watchdog's stall note six hours later. It goes through the
+      # same self-heal path as every other stage. Except the reserved-path refusal (exit 2,
+      # `refused`): the guard has already commented and parked the issue for a person, and a
+      # triage here would send the implementer straight back past that park.
+      - name: The run did not finish
+        if: failure() && steps.reserved.outputs.refused != 'true'
+        env:
+          STAGE: gate
+          RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node .sdlc/bin/dispatch-fix.mjs
 

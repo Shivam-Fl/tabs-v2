@@ -34,7 +34,7 @@ Two jobs. The second matters more.
 Read `review/correctness.json`. **Do not accept its findings — check them.**
 
 For each one: re-run the grep, read the file, construct the input it claims breaks. Then mark
-it `confirmed`, `overstated` (real but not that severe), or `wrong` with your reasoning.
+it `confirmed`, `overstated` (real but not that severe), or `disproved`, with your reasoning.
 
 This is the point of having two reviewers. A single reviewer's false positive lands on the
 PR as fact, wastes the implementer's next attempt, and teaches everyone to ignore the review.
@@ -45,15 +45,26 @@ Be equally willing to find A **understated** something, or missed it entirely.
 
 ## Output `review/design.json`
 
-```jsonc
+Exactly that path, validated against `.sdlc/schemas/review-design.json` when you finish.
+
+```json
 {
-  "findings": [ { "severity": "...", "file": "...", "line": 1, "claim": "...", "evidence": "...", "fix": "..." } ],
+  "findings": [ { "severity": "major", "file": "...", "line": 1, "ac": "AC-2",
+                  "claim": "...", "evidence": "...", "fix": "..." } ],
   "verification_of_a": [
-    { "index": 0, "status": "confirmed | overstated | wrong", "reasoning": "what I checked and found" }
+    { "index": 0, "status": "confirmed", "reasoning": "what I checked and found" }
   ],
-  "verdict": "approve | request-changes"
+  "verdict": "approve"
 }
 ```
+
+- `severity` is exactly one of `blocking`, `major`, `minor`; `status` exactly one of
+  `confirmed`, `overstated`, `disproved`.
+- `index` is **0-based** into `review/correctness.json`'s `findings`. An index that names no
+  finding stops the review: a 1-based list applies each verdict to the wrong finding, and the
+  one you disproved would stand as verified.
+- Write `"findings": []` and `"verification_of_a": []` when there is nothing, rather than
+  leaving them out. Leave out an optional field you have nothing for; do not write `null`.
 
 Only findings that survive both passes reach the PR. Everything else is recorded and dropped —
 a review's credibility is spent the first time it is wrong about something checkable.

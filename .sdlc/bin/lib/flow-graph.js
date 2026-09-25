@@ -128,9 +128,10 @@ function reachable(from, to, graph, seen = new Set()) {
 /**
  * The stage after `from` on this issue's route.
  *
- * @param {string[]|null} route   planned_route from the ledger; null means the default chain
+ * @param {string[]|null} route   planned_route from the ledger; empty or null means the default chain
  * @param {string} from           the stage that has just finished
- * @returns {string|null}         null when the route is finished — the caller reads on_complete
+ * @returns {string|null}         null when the route is finished, or when `from` is not on it —
+ *                                the caller reads on_complete, or reports the disagreement
  */
 export function nextStage(route, from, graph = loadGraph()) {
   const plan = Array.isArray(route) && route.length ? route : DEFAULT_ROUTE;
@@ -140,20 +141,17 @@ export function nextStage(route, from, graph = loadGraph()) {
   if (from === 'gate') return nextStage(plan, 'implement', graph);
   if (from === 'root-cause') return plan.includes('implement') ? 'implement' : null;
 
-  const i = plan.indexOf(from);
-  // A stage that ran but is not on the route is the Router and the pipeline disagreeing.
-  // Falling back to the default chain keeps the issue moving rather than stranding it, and
-  // the caller says so out loud.
-  //
-  // `debug` maps to `plan`'s position because they are the same slot filled by different
-  // agents — a bug is diagnosed rather than designed, and everything after that is identical.
-  // Without this a bug on an unrouted issue reaches the end of a chain it was never on.
-  if (i === -1) {
-    const alias = from === 'debug' ? 'plan' : from;
-    const j = DEFAULT_ROUTE.indexOf(alias);
-    return j === -1 || j + 1 >= DEFAULT_ROUTE.length ? null : DEFAULT_ROUTE[j + 1];
-  }
-  return plan[i + 1] ?? null;
+  // `debug` and `plan` are the same slot filled by different agents — a bug is diagnosed rather
+  // than designed, and everything after that is identical — so each stands in for the other,
+  // on the default chain and on an explicit route alike.
+  let i = plan.indexOf(from);
+  if (i === -1 && (from === 'debug' || from === 'plan')) i = plan.indexOf(from === 'debug' ? 'plan' : 'debug');
+
+  // A stage that ran but is not on an EXPLICIT route is the route and the pipeline disagreeing,
+  // and that is an answer to report, not a gap to fill. This used to fall back to the default
+  // chain: a planner granted a re-route to ["maintainer"] finished, "plan" was no longer on the
+  // route, and the fallback started the implementer on an epic whose job was to be split.
+  return i === -1 ? null : plan[i + 1] ?? null;
 }
 
 /**
@@ -166,7 +164,8 @@ export function nextStage(route, from, graph = loadGraph()) {
  * hand-off into nothing.
  */
 export function dispatchFor(stage, { issue, pr } = {}, graph = loadGraph()) {
-  const s = graph.stages[stage];
+  // Own keys only: a name typed by a person reaches here, and `constructor` is on every object.
+  const s = Object.hasOwn(graph.stages, String(stage)) ? graph.stages[stage] : null;
   if (!s) return null;
   const present = (v) => v !== undefined && v !== null && v !== '';
   const value = (k) => (k === 'pr' ? pr : k === 'epic' ? issue : issue);
@@ -182,4 +181,99 @@ export function dispatchFor(stage, { issue, pr } = {}, graph = loadGraph()) {
     }
   }
   return null;
+}
+
+// What a person, a resume or a retry may call a stage, beyond the graph's own names. `ci` and
+// `gate` are where a red PR stops, and a person retrying either, or a repair, means the
+// implementer fixing it — with the reason carried, because an implementer told only "rework"
+// re-reads the whole review. A re-run of a flake is not that: see rerunTarget below.
+const ALIASES = {
+  implementing: { stage: 'implement' },
+  ci:           { stage: 'implement', rework: 'fix:ci-red' },
+  gate:         { stage: 'implement', rework: 'fix:gate-failed' },
+  triage:       { stage: 'intake' },
+};
+
+/**
+ * Everything needed to start a stage by name: which workflow, with which inputs, claiming which
+ * state. The ONE place a stage name becomes a dispatch.
+ *
+ * There were three hand-copied tables — dispatch-fix, apply-triage and resume-cooled-down —
+ * plus `/sdlc retry` mapping ledger STATES to workflows, and they disagreed: `planning` is the
+ * state of the project decision, the planner, the maintainer and root-cause, so "retry
+ * planning" re-ran whichever one the table happened to list. The recovery hints printed stage
+ * names retry could not parse. This accepts every graph stage, the aliases above, `planning`
+ * (resolved to the planning-state stage that actually stopped), and `merge`, which is not a
+ * stage but the QA workflow re-running only its merge step.
+ *
+ * @param {string} name
+ * @param {{issue?: string|number, pr?: string|number|null, ledger?: object|null, rework?: string|null}} ctx
+ * @returns {{stage: string, workflow: string, args: string[], state: string, counter: string|null,
+ *            rework: string|null, pr: string|number|null} | null}  null for a name nothing can
+ *            start, or a stage that needs a PR when there is none — never a throw
+ */
+export function resolveStage(name, { issue, pr, ledger = null, rework = null } = {}, graph = loadGraph()) {
+  const present = (v) => v !== undefined && v !== null && v !== '';
+  const prNumber = present(pr) ? pr : ledger?.pr ?? null;
+
+  if (name === 'merge') {
+    if (!present(prNumber)) return null;
+    return { stage: 'merge', workflow: graph.stages.qa.workflow,
+      args: ['-f', `pr=${prNumber}`, '-f', 'merge_only=true'],
+      state: 'qa-pass', counter: null, rework: null, pr: prNumber };
+  }
+
+  let stage = name;
+  let why = rework;
+  if (name === 'planning') {
+    const stopped = ledger?.stopped_at;
+    stage = stopped && graph.stages[stopped]?.state === 'planning' ? stopped : 'plan';
+  } else if (Object.hasOwn(ALIASES, name)) {
+    stage = ALIASES[name].stage;
+    why = rework ?? ALIASES[name].rework ?? null;
+  }
+
+  const d = dispatchFor(stage, { issue, pr: prNumber }, graph);
+  if (!d) return null;
+  const args = [...d.args];
+  if (stage === 'implement' && why) args.push('-f', `rework=${why}`);
+  if (stage === 'root-cause') {
+    // What root-cause is putting on trial lives on the ledger, because a re-entry — a retry, a
+    // resume after an outage — has no dispatch inputs to carry it.
+    const p = ledger?.pending;
+    if (present(prNumber)) args.push('-f', `pr=${prNumber}`);
+    if (p?.stage === 'root-cause' && present(p.from)) args.push('-f', `from=${p.from}`);
+    if (p?.stage === 'root-cause' && present(p.qa_run)) args.push('-f', `qa_run=${p.qa_run}`);
+  }
+  return { stage, workflow: d.workflow, args, state: d.state, counter: d.counter,
+    rework: why ?? null, pr: prNumber };
+}
+
+/**
+ * What running a failed stage AGAIN starts — a triage's `rerun` or `resume`, or a cooldown ending.
+ *
+ * Not resolveStage, for two stages. Its `ci` and `gate` aliases are the implementer with a
+ * `fix:` rework, which is right for a person's `/sdlc retry ci` and for a `repair`, and wrong for
+ * a flake: nothing re-ran the check or the gate, so a transient red cost an implement run with
+ * nothing to fix, came back red on the same head with the same signature, and that second
+ * occurrence sent a sound work order to root-cause. A re-run of either is the gate again on the
+ * same PR — for `ci` re-running the checks that failed first — claiming `implementing` as the
+ * implementer's hand-off to the gate does, and spending the `ci` counter, which sdlc-gate does
+ * not spend for itself.
+ *
+ * @returns same shape as resolveStage, or null
+ */
+export function rerunTarget(stage, ctx = {}, graph = loadGraph()) {
+  const pr = ctx.pr !== undefined && ctx.pr !== null && ctx.pr !== '' ? ctx.pr : ctx.ledger?.pr ?? null;
+  if ((stage === 'ci' || stage === 'gate') && pr !== null && pr !== '') {
+    return { stage: 'gate', workflow: graph.stages.gate.workflow,
+      args: ['-f', `pr=${pr}`, ...(stage === 'ci' ? ['-f', 'rerun_failed=true'] : [])],
+      state: 'implementing', counter: 'ci', rework: null, pr };
+  }
+  return resolveStage(stage, ctx, graph);
+}
+
+/** The only form any message may print to tell a person how to run a stage again. */
+export function retryHint(stage) {
+  return '`/sdlc retry ' + stage + '`';
 }

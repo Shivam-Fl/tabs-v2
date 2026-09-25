@@ -9,43 +9,114 @@
 // Reviewing without routing is just commenting. This is the step that makes a review mean
 // something: approve hands the PR to QA, request-changes hands it back to the implementer.
 
-import { gh, ghJson, setOutput, die, loadConfig, repo as repoOf } from './lib/actions.js';
+import { gh, ghJson, setOutput, die, loadConfig, isTrustedAuthor, repo as repoOf } from './lib/actions.js';
 import { readLedger, updateLedger } from './lib/state-io.js';
 import { advance } from './lib/advance.js';
-import { reviewVerdict, unresolvedFindings, rejectionCriteria, repeatedCriterion } from './lib/routing.js';
-import { handOffNext, markResume } from './lib/route-io.js';
+import { reviewVerdict, verdictBlock, unresolvedFindings, rejectionCriteria, repeatedCriterion } from './lib/routing.js';
+import { handOffNext, markResume, dispatchStage } from './lib/route-io.js';
+import { resolveStage } from './lib/flow-graph.js';
 import { fileIssue } from './lib/file-issue.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-const exec = promisify(execFile);
+import { readFileSync, existsSync } from 'node:fs';
 
 const pr = process.env.PR || die('PR is required');
-const dispatch = (wf, ...args) => exec('node', ['.sdlc/bin/dispatch.mjs', wf, ...args]);
+const repo = repoOf();
+const cfg = await loadConfig();
 
 // headRefOid, because a criterion rejected twice against the SAME commit is one round
 // re-judged rather than two attempts that both failed.
-const data = await ghJson(['pr', 'view', pr, '--json', 'reviews,body,headRefOid']);
+const data = await ghJson(['pr', 'view', pr, '--json', 'body,headRefOid']);
 const issue = (data.body ?? '').match(/(?:closes|fixes|resolves)\s+#(\d+)/i)?.[1];
 if (!issue) {
   // Not ours: no work order, no ledger, nothing to route. Silence beats a confusing failure.
   process.stdout.write(`PR #${pr} closes no issue — reviewed, but there is nothing to route\n`);
   process.exit(0);
 }
+const head = data.headRefOid ?? null;
+
+// Only the reviews that can decide THIS round: written by the pipeline or a maintainer, on the
+// commit being routed, since this job started.
+//
+// This took the newest review on the PR, whoever wrote it and whatever it judged. On a public
+// repository anyone can submit a review, so an outsider's `{"verdict":"approve"}` posted after
+// the bot's rejection sent the PR to QA, and its `unresolved` list was filed by the pipeline as
+// a trusted follow-up that intake then started without asking anyone. And a reviewer that ran
+// out of turns in round 2 without posting left round 1's approval as the newest review — of a
+// commit the rework had since rewritten — so unreviewed code went to QA and merged.
+//
+// JOB_STARTED is when the run's first job began. Without it (a run by hand) the commit
+// check still holds; only a review from an earlier run on this same commit can still count.
+const since = Date.parse(process.env.JOB_STARTED ?? '');
+if (Number.isNaN(since)) {
+  process.stdout.write('::warning::JOB_STARTED is not set — a review from an earlier run on this same commit can count\n');
+}
+const posted = (await gh(['api', `repos/${repo}/pulls/${pr}/reviews?per_page=100`, '--paginate', '--jq', '.[]']))
+  .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+const reviews = posted
+  .filter((r) => isTrustedAuthor({ login: r.user?.login, association: r.author_association }, cfg))
+  .filter((r) => head && r.commit_id === head)
+  .filter((r) => Number.isNaN(since) || Date.parse(r.submitted_at) >= since)
+  .sort((a, b) => String(a.submitted_at).localeCompare(String(b.submitted_at)));
+
+// The single reviewer's review, from the file it wrote: the newest review of this round.
+//
+// It used to post the review itself, which took a token that could write — so a diff that
+// talked it round could push, label or dispatch with it. It runs read-only now, and the publish
+// job posts what it wrote quoted, where a fenced block is no longer a block. So the verdict is
+// read here, as the reviewer wrote it. No file is no review, exactly as no post was.
+if (process.env.REVIEW && existsSync(process.env.REVIEW)) {
+  reviews.push({ body: readFileSync(process.env.REVIEW, 'utf8'), state: 'COMMENTED' });
+}
 
 // `declared` is the council's merged verdict when the council ran. In single-reviewer mode it
-// is empty and GitHub holds the answer instead.
-const verdict = reviewVerdict({ declared: process.env.VERDICT || null, reviews: data.reviews ?? [] });
+// is empty, and the reviews above hold the answer: the reviewer's file, newest.
+const verdict = reviewVerdict({ declared: process.env.VERDICT || null, reviews });
+
+// What the council decided beyond the verdict. It posts a comment, never a review, and this
+// read the follow-ups and the rejection criteria from reviews — so in council mode an
+// approval's major findings stopped existing at the merge, and every rejection was recorded as
+// being about nothing, so a criterion rejected every round never reached root-cause.
+let council = null;
+if (process.env.VERDICT) {
+  const file = process.env.MERGED || 'review/merged.json';
+  try { council = JSON.parse(readFileSync(file, 'utf8')); } catch (e) {
+    die(`the council's verdict is set, but what it decided (${file}) cannot be read: ${e.message}`);
+  }
+}
 setOutput('verdict', verdict ?? '');
 setOutput('issue', issue);
 
-// Nothing was posted at all. Not an approval — an agent that finished without producing a
-// review is a failure that happens to look quiet.
-if (!verdict) {
-  await gh(['pr', 'comment', pr, '--body',
-    'The review stage finished without posting a review, so there is no verdict to act on. ' +
-    'This says nothing about the code. Routing to a human rather than treating silence as approval.']);
+// Stop for a person, and leave `/sdlc approve` something to do: run the review again. These
+// stops recorded no resume point, so the approve printed on them had nothing to dispatch.
+async function toAPerson(body) {
+  await gh(['pr', 'comment', pr, '--body', `${body}\n\n\`/sdlc approve\` runs the review again.`]);
   await advance(issue, 'needs-human', { agent: 'reviewer' });
+  await markResume(repo, issue, 'review', 'retry').catch(() => {});
   process.exit(0);
+}
+
+// No verdict. Not an approval — an agent that finished without producing a review is a failure
+// that happens to look quiet. But "no review was posted" is only true when none was: a review
+// whose block says something the pipeline cannot read is quoted, so the person can see it.
+if (!verdict) {
+  const block = reviews.length ? verdictBlock(reviews.at(-1).body) : null;
+  // A plain fence, not a json one: this is the reviewer's block shown in a comment of the
+  // pipeline's, and a json block there is one the pipeline stands behind — a failure packet is
+  // exactly that, and a reviewer's block shaped like one was re-posted as one.
+  await toAPerson(block
+    ? 'The review states a verdict the pipeline cannot read:\n\n```\n' +
+      `${JSON.stringify(block).slice(0, 2000)}\n\`\`\`\n\n` +
+      'It has to be `approve`, `request-changes` or `comment`. This says nothing about the code; ' +
+      'routing to a human rather than guessing what it meant.'
+    : `No review of the current head (\`${String(head).slice(0, 8)}\`) was posted by the reviewer ` +
+      'during this run, so there is no verdict to act on. This says nothing about the code. ' +
+      'Routing to a human rather than treating silence as approval.');
+}
+
+// The reviewer's own answer, and it is not a verdict on the code: it found something it cannot
+// judge without a person.
+if (verdict === 'comment') {
+  await toAPerson('The reviewer asked for a human: its verdict is `comment`, which means it ' +
+    'found something it cannot judge on its own. Read the review above and answer it.');
 }
 
 // Make the PR say what the pipeline decided.
@@ -59,7 +130,7 @@ if (!verdict) {
 // the judgement; this states it in the one place GitHub, branch protection and a human all
 // read.
 async function recordOnThePr(state) {
-  const already = (data.reviews ?? []).some((r) => r.state === state);
+  const already = reviews.some((r) => r.state === state);
   if (already) return;
   const flag = state === 'APPROVED' ? '--approve' : '--request-changes';
   await gh(['pr', 'review', pr, flag, '--body',
@@ -97,7 +168,7 @@ if (verdict === 'approve') {
   // Optional is the reviewer saying they will not hold the merge. It is a statement about
   // severity, not a judgement that the finding is wrong — somebody already did the work of
   // finding it and writing the fix.
-  const leftovers = unresolvedFindings(data.reviews ?? []);
+  const leftovers = council ? council.unresolved ?? [] : unresolvedFindings(reviews);
   let filedNumber = null;
 
   // ONE follow-up issue, not one per finding.
@@ -111,12 +182,18 @@ if (verdict === 'approve') {
   // The findings still survive the PR that found them, which was the whole point. They
   // survive together, in one ticket, which is also how a person would have written them down.
   if (leftovers.length) {
+    // The reviewer's words, in a ticket the pipeline files — so each title is one line and each
+    // detail is quoted. The Router obeys the Decisions section of an issue the pipeline opened,
+    // and a planner is held to its split acceptance; both are found by heading. A finding that
+    // carried "## Decisions (recorded by the pipeline)" and a maintainer's name in it was a
+    // decision on the follow-up, taken by whoever wrote the diff the reviewer read.
+    const quote = (s) => String(s).split('\n').map((l) => `> ${l}`).join('\n');
     const body = [
       `Non-blocking findings from the review of #${pr} (for #${issue}) that were not fixed in ` +
       'that PR. The reviewer judged none of them worth holding the merge for — which is a ' +
       'statement about severity, not a judgement that they are wrong.',
       '',
-      ...leftovers.map((f) => `### ${f.title}\n\n${f.detail}`),
+      ...leftovers.map((f) => `### ${f.title.replace(/\s+/g, ' ')}\n\n${quote(f.detail)}`),
       '',
       '---',
       '',
@@ -130,9 +207,13 @@ if (verdict === 'approve') {
       `Depends on #${issue}.`,
     ].join('\n');
 
+    // `sdlc:blocked` alone. `sdlc:triage` beside it is an in-flight label, so the follow-up
+    // counted as running and nothing ever offered it a slot: the dependency closed, the wake
+    // skipped it as already started, and the findings sat there with nothing going to start
+    // them. Blocked is what it is, and it is what wake-dependents re-offers.
     const made = await fileIssue({
       title: `Follow-ups from the review of #${pr}`,
-      labels: ['sdlc:triage', 'sdlc:blocked'],
+      labels: ['sdlc:blocked'],
       start: false,
       body,
     });
@@ -152,7 +233,7 @@ if (verdict === 'approve') {
   // route rather than out of this file: `sdlc-qa.yml` was correct for every ticket the
   // pipeline had ever run and would have been wrong for the first one that did not need it.
   const { stage } = await handOffNext({
-    repo: repoOf(), issue, pr, from: 'review', agent: 'reviewer',
+    repo, issue, pr, from: 'review', agent: 'reviewer',
     why: 'the review approved this PR and nothing else will start what comes after it',
   });
   process.stdout.write(`issue #${issue}: approved -> ${stage ?? '(end of route)'}\n`);
@@ -172,16 +253,25 @@ await recordOnThePr('CHANGES_REQUESTED');
 // correctly, not to widen scope during a rework will fix exactly the call site the reviewer
 // named, so one acceptance criterion can be rejected three times running, each finding real
 // and each strictly deeper than the last, while nothing ever reconsiders the shape.
-const cfg = await loadConfig();
-const ledger = await readLedger(repoOf(), Number(issue)).then((r) => r.ledger).catch(() => null);
-const criteria = rejectionCriteria(data.reviews ?? []);
-// The commit this review judged. Two rejections of one criterion against the SAME commit are
-// one round re-judged, not two attempts that both failed.
-const head = data.headRefOid ?? null;
+const ledger = await readLedger(repo, Number(issue)).then((r) => r.ledger).catch(() => null);
+const criteria = council ? council.blocking_criteria ?? [] : rejectionCriteria(reviews);
+// `head` is the commit this review judged. Two rejections of one criterion against the SAME
+// commit are one round re-judged, not two attempts that both failed.
 const repeat = repeatedCriterion(ledger?.review_history ?? [], criteria, head);
 const repeatEscalate = Number(cfg.limits?.repeat_failure_escalate ?? 2);
 
-await updateLedger(repoOf(), Number(issue), (l) => (l
+// Every dispatch below goes through dispatchStage, which records on the ledger WHY the stage is
+// starting. They used to call dispatch.mjs directly, so the reason lived only in the dispatch
+// input: an implementer re-entered after an outage, a retry or an approve ran with no
+// `rework=review` and rebuilt the branch as new work, and a re-entered root-cause lost its PR.
+async function start(target, why, extra = {}) {
+  if (!target) die(`issue #${issue}: nothing can start the next stage — the stage graph does not resolve it`);
+  const r = await dispatchStage({ repo, issue, target, agent: 'reviewer', why, extra });
+  if (r.halted) process.stdout.write(`issue #${issue}: halted — "${target.stage}" was not started\n`);
+  return r;
+}
+
+await updateLedger(repo, Number(issue), (l) => (l
   ? { ...l, review_history: [...(l.review_history ?? []), { criteria, head }].slice(-20) }
   : null)).catch(() => {});
 
@@ -201,7 +291,7 @@ if (repeat && repeat.rounds >= repeatEscalate && alreadyTried) {
     'reconsidered, the fix has been rewritten, and the disagreement is about what "done" means ' +
     'here.\n\nA person decides this.']);
   await advance(issue, 'needs-human', { agent: 'reviewer' });
-  await markResume(repoOf(), issue, 'review', 'retry').catch(() => {});
+  await markResume(repo, issue, 'review', 'retry').catch(() => {});
   process.stdout.write(`issue #${issue}: ${repeat.criterion} still rejected after root-cause -> needs-human\n`);
   process.exit(0);
 }
@@ -215,25 +305,24 @@ if (repeat && repeat.rounds >= repeatEscalate) {
     'the attempt cap without anything reconsidering the SHAPE of the fix.\n\n' +
     'So the work order goes on trial instead of the implementer getting the same instruction ' +
     'again. That is what root-cause is for.']);
-  await updateLedger(repoOf(), Number(issue), (l) => (l ? {
+  await updateLedger(repo, Number(issue), (l) => (l ? {
     ...l,
     // The next rejection is against a REVISED work order. Carrying the old streak forward
     // would re-escalate on the very next round and every other round after it.
     review_history: [],
     review_root_caused: [...new Set([...(l.review_root_caused ?? []), repeat.criterion])],
   } : null)).catch(() => {});
-  await advance(issue, 'planning', { agent: 'reviewer' });   // root-cause's state, per flow-graph.json
-  await dispatch('sdlc-root-cause.yml', '-f', `issue=${issue}`, '-f', `pr=${pr}`);
+  await start(resolveStage('root-cause', { issue, pr }),
+    `${repeat.criterion.toUpperCase()} was rejected ${repeat.rounds} rounds running`, { from: 'review' });
   process.stdout.write(`issue #${issue}: ${repeat.criterion} rejected ${repeat.rounds}x -> root-cause\n`);
   process.exit(0);
 }
 
-await advance(issue, 'implementing', { agent: 'reviewer' });
 await gh(['pr', 'comment', pr, '--body',
   'Review requested changes, so this goes back to the implementer rather than on to QA. ' +
   'The existing branch is what was rejected — the next run reads the review above and ' +
   'addresses the blocking findings on the same branch, it does not start over.']);
 // The label alone starts nothing: GitHub will not trigger a workflow from a GITHUB_TOKEN
 // event. `rework` is what stops the next run deciding the branch is already finished work.
-await dispatch('sdlc-implement.yml', '-f', `issue=${issue}`, '-f', 'rework=review');
+await start(resolveStage('implement', { issue, pr, rework: 'review' }), 'the review requested changes', { head });
 process.stdout.write(`issue #${issue}: changes requested -> implementing\n`);

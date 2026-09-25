@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // Polls the preview until it answers, so QA never reports a deploy race as a product bug.
 import { loadConfig, flags, die } from './lib/actions.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { isTrivialScript } from './lib/guards.js';
 
 const { url } = flags();
 const cfg = await loadConfig();
@@ -15,6 +19,26 @@ const cfg = await loadConfig();
 // file that documents a sentinel and the file that reads it have to agree about it.
 const configured = Number(flags().timeout ?? cfg.env?.ready_timeout_seconds ?? 0);
 const timeout = configured > 0 ? configured : (cfg.env?.mode === 'compose' ? 420 : 180);
+// The app's own readiness check wins when it has one. The architecture brief decides it
+// (`sdlc:ready`: `curl -f http://localhost:3000/health`), and this polled env.ready — "/", which
+// a FastAPI app answers with 404 — so QA would have waited out the whole timeout on an app that
+// was up. A stub sdlc:ready is not a check, so it falls back to the configured path.
+const appDir = process.env.APP_DIR || '.';
+const pkgPath = join(appDir, 'package.json');
+const readyScript = existsSync(pkgPath) ? JSON.parse(readFileSync(pkgPath, 'utf8')).scripts?.['sdlc:ready'] : undefined;
+if (typeof readyScript === 'string' && !isTrivialScript(readyScript)) {
+  const deadline = Date.now() + timeout * 1000;
+  let last = '';
+  do {
+    const r = await new Promise((res) => execFile('npm', ['run', '-s', 'sdlc:ready'], { cwd: appDir, timeout: 20_000 },
+      (e, stdout, stderr) => res({ ok: !e, out: String(stderr || stdout || e?.message || '').trim() })));
+    if (r.ok) { process.stdout.write(`ready: sdlc:ready passed (${readyScript})\n`); process.exit(0); }
+    last = r.out.split('\n').pop();
+    await new Promise((r2) => setTimeout(r2, 3000));
+  } while (Date.now() < deadline);
+  die(`app never became ready: sdlc:ready (${readyScript}) kept failing for ${timeout}s (last: ${last}).` +
+    '\nThis is an environment failure, not a product defect — QA is blocked, not failed.');
+}
 const readyPath = cfg.env?.ready ?? '/';
 const target = new URL(readyPath, url).toString();
 const deadline = Date.now() + Number(timeout) * 1000;

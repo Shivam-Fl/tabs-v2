@@ -33,6 +33,18 @@ if (mode === 'secrets') {
   // so a missing one fails here rather than as a confusing login timeout mid-run.
   const declared = auth.accounts ?? [{ role: 'primary', fields: { email: 'QA_USER_EMAIL', password: 'QA_USER_PASSWORD' } }];
   const names = declared.flatMap((a) => Object.values(a.fields ?? {}));
+  // sdlc-qa.yml hands this step exactly these. YAML cannot name a secret at run time, and
+  // passing toJSON(secrets) would give every secret to the job that runs the PR's code — so any
+  // other name can never arrive, however it is set. setup used to generate QA_<ROLE>_<FIELD>
+  // names, and the step then reported them "not set" while the owner could see them set.
+  const PASSED = ['QA_USER_EMAIL', 'QA_USER_PASSWORD'];
+  const unpassed = names.filter((n) => !PASSED.includes(n));
+  if (unpassed.length) {
+    die(`qa_auth.accounts names ${unpassed.join(', ')}, which sdlc-qa.yml never passes to QA — ` +
+        `it passes exactly ${PASSED.join(' and ')}.\n` +
+        '  Store the account in those two secrets. For a second role, use qa_auth.mode "derived" ' +
+        '(QA signs up as each role, passwords derived from QA_FIXTURE_SEED).');
+  }
   const missing = names.filter((n) => !process.env[n]);
   if (missing.length) {
     die(`qa_auth.mode is "secrets" but these are not set: ${missing.join(', ')}\n` +

@@ -13,6 +13,10 @@
 // Pure functions. The rules decide how much money a ticket costs and whether a human sees it,
 // so they are testable without GitHub.
 
+import { epicOf } from './deps.js';
+import { riskAreas } from './triage.js';
+import { decisionsOf, DECISIONS_HEADING } from './issue-body.js';
+
 /** The chain the framework shipped with, for anything the rules will not commit to. */
 export const FULL = ['plan', 'implement', 'review', 'qa'];
 
@@ -33,6 +37,25 @@ export function prose(body = '') {
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
 }
 
+/** Where the spec lives when config does not say: spec-index.mjs reads the same default. */
+export const SPEC_PATHS = ['docs/spec', 'SPEC.md'];
+
+/**
+ * The spec path the text names or links (`docs/spec/x.md`, a blob URL, a bare `SPEC.md`), or null.
+ * A path under a spec directory counts, and so does the directory itself; `docs/specification.md`
+ * and `MYSPEC.md` do not.
+ */
+export function specPointer(text = '', specPaths = SPEC_PATHS) {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const p of specPaths ?? SPEC_PATHS) {
+    const path = String(p).trim().replace(/^\.\//, '').replace(/\/+$/, '');
+    if (!path) continue;
+    const m = String(text).match(new RegExp(`(?<![\\w.-])${esc(path)}(?:/[\\w./-]*[\\w-])?(?![\\w-])`, 'i'));
+    if (m) return m[0];
+  }
+  return null;
+}
+
 /** Paths the issue names explicitly, in backticks, that we can check actually exist. */
 export function namedPaths(body = '') {
   const out = new Set();
@@ -40,7 +63,17 @@ export function namedPaths(body = '') {
   return [...out];
 }
 
-const AUDIT = /\b(audit|scan|sweep)\b[^.]{0,60}\b(for|the|this|our)\b|\bfind (?:any |all )?bugs?\b|\breview .{0,40}\bfor (?:bugs|issues|problems|defects)\b|\bpenetration test\b/i;
+// Audit, question and trivial commit only on a signal a person gave on purpose: a label, or a
+// title that says what it is. They used to fire on a word anywhere in the title, and each is
+// expensive to get wrong. "Audit trail for expense edits" and "Scan the receipt to prefill the
+// expense form" were audits — routed to QA alone and closed with nothing built. "Why does the
+// total show NaN?" is a bug report, and was answered with a plan. "Copy the invite link" and
+// "Rename a group" are features, and lost their review as trivial chores. Anything short of a
+// signal is the model pass's to judge; that is what it is for.
+const AUDIT_TITLE = /^\s*audit\s*:/i;
+const QUESTION_TITLE = /^\s*question\s*:/i;
+// An issue stating what must be true when it is done wants it built, whatever it is called.
+const ACCEPTANCE = /^#{1,6}\s*acceptance\b|\bAC-\d+\b/im;
 const FIX_VERB = 'fix|repair|resolve|patch|implement|add|build|change|update|refactor|migrate';
 
 // "Do not fix anything" is the clearest possible statement that nothing is to be fixed, and
@@ -57,8 +90,9 @@ const WANTS_FIX = new RegExp(`\\b(${FIX_VERB})\\b`, 'i');
 function asksForAChange(text) {
   return WANTS_FIX.test(String(text).replace(NEGATED_FIX, ' '));
 }
-const QUESTION = /^\s*(?:#+\s*)?(should we|what(?:'s| is| are)? the best|how should|thoughts on|is it worth|do we (?:need|want)|which approach|why (?:do|does|is))\b/i;
-const TRIVIAL = /^\s*(?:#+\s*)?(typo|copy|wording|rename|spelling|grammar|label text|placeholder text)\b/i;
+// A title that starts by naming the change. Not "copy" or "rename": those are verbs, and
+// "Copy the invite link to the clipboard" is a feature.
+const TRIVIAL = /^\s*(?:#+\s*)?(typo|wording|spelling|grammar|label text|placeholder text)\b/i;
 
 /**
  * Phase one. Returns a flow plan, or null to say "a model should look at this".
@@ -67,7 +101,9 @@ const TRIVIAL = /^\s*(?:#+\s*)?(typo|copy|wording|rename|spelling|grammar|label 
  * indistinguishable from one a model made badly.
  *
  * @param {{number: number, title?: string, body?: string, labels?: any[], kind?: string}} issue
- * @param {{existingPaths?: string[]}} facts  paths from namedPaths() that really exist in the repo
+ * @param {{existingPaths?: string[], greenfield?: boolean, specPaths?: string[]}} facts
+ *        existingPaths: paths from namedPaths() that really exist in the repo; greenfield:
+ *        `.sdlc/memory/project.md` is still a stub; specPaths: config's `spec.paths`
  */
 export function fastPath(issue = {}, facts = {}) {
   const labels = labelNames(issue);
@@ -91,7 +127,8 @@ export function fastPath(issue = {}, facts = {}) {
   // An audit asks a question about code that already exists. There is no PR, so there is
   // nothing to plan, implement or review — QA runs against the deployed target and every
   // finding becomes its own issue.
-  if (AUDIT.test(text) && !asksForAChange(text)) {
+  const audit = labels.includes('sdlc:audit') || AUDIT_TITLE.test(title);
+  if (audit && !asksForAChange(text) && !ACCEPTANCE.test(body) && !epicOf(issue.body ?? '')) {
     return plan({
       kind: 'audit',
       reasoning: 'Asks for a sweep of existing behaviour and asks for nothing to be changed. There is no PR to plan or review, so QA runs against the deployed target and files what it finds.',
@@ -104,7 +141,7 @@ export function fastPath(issue = {}, facts = {}) {
 
   // A question wants an answer, not a branch. The planner is the agent that reads the repo
   // and writes down what it found, which is exactly what answering one requires.
-  if (QUESTION.test(title) || (QUESTION.test(body) && !asksForAChange(text))) {
+  if (labels.includes('question') || QUESTION_TITLE.test(title)) {
     return plan({
       kind: 'question',
       reasoning: 'Asks what should be done rather than asking for it to be done. The plan is the answer; building anything from it is a separate decision a person makes.',
@@ -116,7 +153,7 @@ export function fastPath(issue = {}, facts = {}) {
     });
   }
 
-  if (TRIVIAL.test(title)) {
+  if (labels.includes('sdlc:trivial') || TRIVIAL.test(title)) {
     const real = facts.existingPaths ?? [];
     // The planner stays, and the council and the review go.
     //
@@ -151,6 +188,25 @@ export function fastPath(issue = {}, facts = {}) {
       on_complete: 'merge',
       confidence: 90,
       matched_rule: 'label:bug',
+    });
+  }
+
+  // On a greenfield repo the issue that points at the spec IS the product epic. Nothing is built
+  // and nothing is decided, so what it asks for is everything the spec describes, and a single
+  // plan for that is one plan for the whole product that stops at a comment — no epics, ever.
+  // Seen live: "Decide the architecture ... specified in docs/spec/… ... break it into epics" was
+  // routed project -> plan, comment-only, and only worked before because it carried the label.
+  // Last, so a label a person gave on purpose still wins; never on a piece of an epic.
+  const spec = facts.greenfield && !epicOf(issue.body ?? '')
+    && specPointer(`${title}\n${issue.body ?? ''}`, facts.specPaths);
+  if (spec) {
+    return plan({
+      kind: 'epic',
+      reasoning: `Points at the spec (${spec}) on a repository that has not decided what it is built out of, which makes it the product itself. It goes to the maintainer to be split into epics once the architecture is decided, and each piece is routed on its own.`,
+      route: ['maintainer'],
+      on_complete: 'comment-only',
+      confidence: 90,
+      matched_rule: 'greenfield-spec',
     });
   }
 
@@ -202,7 +258,37 @@ export function routeGate(plan = {}, config = {}) {
   }
   const maxRisk = config.gates?.max_route_risk ?? 100;
   if (typeof plan.risk === 'number' && plan.risk > maxRisk) {
-    return { gate: 'human', reason: `route risk ${plan.risk} is above max_route_risk ${maxRisk}` };
+    // Not when the risk is only about areas this repo switched off. The model scored an area
+    // high because its pack said to, whatever `intake.risk_areas` said — so switching an area
+    // off at intake moved the stop one stage later instead of removing it. A reason naming no
+    // area at all, or any area still on, still stops.
+    const named = riskAreas({ body: plan.reasoning }).risky;
+    const off = named.filter((n) => config.intake?.risk_areas?.[n] === false);
+    if (!named.length || off.length < named.length) {
+      return { gate: 'human', reason: `route risk ${plan.risk} is above max_route_risk ${maxRisk}` };
+    }
+    return { gate: 'none', reason: `route risk ${plan.risk} is about ${off.join(' and ')}, which intake.risk_areas switches off here` };
   }
   return { gate: 'none', reason: `route confidence ${c ?? '(none)'} clears the bar` };
+}
+
+/**
+ * The human decisions the Router is given, as prompt text: the pipeline-maintained section of
+ * the issue body, never a comment.
+ *
+ * The prompt grepped every comment for "## Route note from", so anyone on a public repository
+ * could post one and drop the review from a ticket or redirect it. run-command writes decisions
+ * into the body, which an outsider cannot edit — except on an issue they filed themselves, where
+ * they can write that heading too. So on an outsider's issue only the entries run-command also
+ * recorded on the ledger (same author, same moment) count; on a trusted reporter's issue the
+ * body is theirs or the pipeline's, and all of it does.
+ *
+ * @param {{answers?: {at: string, by: string}[], route_notes?: {at: string, by: string}[]}|null} ledger
+ */
+export function recordedDecisions(body, { reporterTrusted = false, ledger = null } = {}) {
+  const key = (e) => `${e.at}\u0000${String(e.by ?? '').toLowerCase()}`;
+  const onLedger = new Set([...(ledger?.answers ?? []), ...(ledger?.route_notes ?? [])].map(key));
+  const kept = decisionsOf(body).filter((d) => reporterTrusted || onLedger.has(key(d)));
+  if (!kept.length) return `(none recorded in "${DECISIONS_HEADING}")`;
+  return kept.map((d) => `- ${d.kind} by @${d.by} (${d.at}):\n${d.text.split('\n').map((l) => `  ${l}`).join('\n')}`).join('\n');
 }

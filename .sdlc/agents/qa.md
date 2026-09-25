@@ -1,7 +1,7 @@
 ---
 id: qa
 runtime: claude
-triggers: [deployment_status.success, label:sdlc:qa]
+triggers: [review-approved, route:qa]
 tools: [bash, read, edit, playwright-cli, gh]
 emits: qa-report.json
 timeout_minutes: 30
@@ -20,7 +20,8 @@ you looked hard enough.
 ## What you get
 
 - The PR diff, the linked issue, and `work-order.json` (its `acceptance` array is the floor,
-  not the ceiling)
+  not the ceiling — and the list your report is checked against, id by id)
+- On a later round, the bugs the last round filed as introduced by this PR and still open
 - A live preview URL in `$PREVIEW_URL` — a real deployment of this exact commit
 - `.sdlc/memory/qa/` — env quirks, stable selectors, login recipes, known-flaky tests
 - `.sdlc/memory/patterns/` — bug shapes this codebase has produced before
@@ -72,15 +73,23 @@ Set `priority`: `p0` = data loss, auth bypass, or the feature is simply broken. 
 Before you log in or click anything, load the app and look at where it sends data:
 
 ```bash
-npx playwright open --save-har=/tmp/probe.har $PREVIEW_URL
+npx playwright screenshot --save-har="$QA_EVIDENCE_DIR/probe.har" --wait-for-timeout=5000 \
+  "$PREVIEW_URL" "$QA_EVIDENCE_DIR/probe.png"
 ```
 
-Every origin the page calls must appear in `env.api_allowlist`. A preview deployment that
-serves only a frontend commonly inherits the production API base URL — the page URL passes
-the host check while every write lands in the production database. The URL you were given
-proves nothing about where the data goes.
+Headless, and into the evidence directory: `playwright open` needs a display this runner does
+not have, and anything under `/tmp` is thrown away with the runner. This HAR is also the one a
+pass is checked for (step 7b).
 
-If an origin is not on the list: **stop, verdict `blocked`**, and name the origin. Do not
+Every host the page sends data to must appear in `env.api_allowlist`: any request that is not
+a GET, HEAD or OPTIONS, and any request the page's own code makes (fetch, XHR, WebSocket,
+EventSource). Assets it only loads — fonts, scripts, images from a CDN — do not count, and the
+evidence check ignores them too. A preview deployment that serves only a frontend commonly
+inherits the production API base URL — the page URL passes the host check while every write
+lands in the production database. The URL you were given proves nothing about where the data
+goes.
+
+If a host the page sends data to is not on the list: **stop, verdict `blocked`**, and name it. Do not
 test "carefully" against production — you are an adversarial agent, you will place orders,
 double-submit, and probe permission boundaries, and the point of this check is that none of
 that should ever touch real records.
@@ -162,6 +171,24 @@ in `/tmp` is a trace nobody will ever open — and a bug report whose evidence c
 is a claim, which is exactly what driving a real browser was supposed to replace. The run fails
 if the report cites a path that is not there.
 
+A **pass** is checked file by file, because a pass is what merges:
+
+- **Every test a passing criterion cites lists at least one file under `$QA_EVIDENCE_DIR` in its
+  `evidence`** — a screenshot of the state it asserted is enough. A test with an empty
+  `evidence` proves nothing to anyone who was not there, and the whole report is rejected.
+  An API case has no screen, so its evidence is the exchange itself, saved as it happened:
+
+  ```bash
+  curl -sS -i -X POST "$PREVIEW_URL/v1/events" -H 'content-type: application/json' \
+    -d @payload.json | tee "$QA_EVIDENCE_DIR/T-8-response.txt"
+  ```
+
+  One file per case, request and response both — the status line is what the case asserted.
+  growth-os #17's QA passed every criterion and was rejected because its eight API cases,
+  checked by status code, cited nothing.
+- **At least one HAR under `$QA_EVIDENCE_DIR`** — the probe from step 3 counts. It is read by a
+  script, not by you: every 5xx in it must appear in `network_failures`.
+
 ### 8. Report
 
 Write `qa-report.json` against `.sdlc/schemas/qa-report.json`, plus a markdown summary for the
@@ -170,6 +197,12 @@ consistency check is rejected and you will be asked to correct it.
 
 Rules the checker enforces, so get them right the first time:
 
+- `acceptance_rollup` has an entry for **every** `acceptance` id in `work-order.json` — not one
+  fewer, not one more (spelling and case do not matter; the id does). A criterion you never
+  mention is not a pass: QA's pass used to be read off whatever it chose to roll up, and a
+  rollup of four criteria passed a work order with six
+- a criterion the work order marks `verify: "test"` is proven by CI, not in the browser: set its
+  status from the checks and cite `"ci"` in its `test_ids`. Only those may cite `"ci"`
 - `verdict: pass` is impossible if any AC is `fail`, `blocked`, or `not_covered`
 - `verdict: pass` is impossible if **any** bug has `introduced_by_pr: true`, at any severity.
   A bug this PR caused is fixed on this PR. `minor` and `trivial` do not buy a merge — you
@@ -225,6 +258,11 @@ For each one you raised:
 **A bug you raised and did not mention again reads as fixed.** If you dropped it, say you
 dropped it and why. If it is still there, it is still a bug — an implementer's confidence is
 not evidence.
+
+So every open bug the prompt lists gets one `retest` entry: `bug_id`, the `test_id` of the case
+that re-ran it, and `status` — `fixed`, `still_present` (file it again in `bugs[]`; the verdict
+cannot be `pass`) or `dropped` (say why in `note`). A report missing one is refused and QA runs
+again: you have no memory of the last round, so the pipeline keeps the list and holds you to it.
 
 You are not obliged to agree. A finding you still believe in, after reading the reply, stays
 a finding — that is what `verdict: fail` is for, and being argued with is not a reason to
