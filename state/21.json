@@ -87,8 +87,8 @@
       "action": "lock released"
     }
   ],
-  "resume_at": null,
-  "stopped_at": null,
+  "resume_at": "project",
+  "stopped_at": "project",
   "dispatched_stage": "project",
   "flow_plan": {
     "kind": "epic",
