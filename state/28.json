@@ -316,5 +316,29 @@
       }
     ],
     "pr": "29"
-  }
+  },
+  "qa": {
+    "verdict": "blocked",
+    "introduced_bugs": 1,
+    "ac_ids": [
+      "AC-1",
+      "AC-2",
+      "AC-3",
+      "AC-4",
+      "AC-5",
+      "AC-6",
+      "AC-7",
+      "AC-8"
+    ],
+    "sha": "38983069b3451adff4f6ee6a4d6b5ddd453d1c6f",
+    "run_id": "36269182868",
+    "work_order_version": 1,
+    "at": "2026-09-26T20:29:29.652Z"
+  },
+  "qa_open_bugs": [
+    {
+      "id": "BUG-1",
+      "title": "Default `sdlc:seed` silently overwrites the seeded group a user has edited, while its stdout and the new README both state that nothing is deleted"
+    }
+  ]
 }
