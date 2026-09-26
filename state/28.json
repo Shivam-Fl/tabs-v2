@@ -180,7 +180,12 @@
     "confidence_rationale": "Every claim was read in the code and the data loss was reproduced on a scratch copy of the store. The change is confined to one script, one package.json line, one README section and one test file, and the existing test at test/domain.test.js:401 pins the fresh-run behaviour the fix has to preserve. What is not fully certain is the exact name-normalisation in src/server.js, which the work order tells the implementer to read and match rather than guess; that affects one guard branch, not the data-loss fix.",
     "mode": "committed"
   },
-  "touch_paths": [],
+  "touch_paths": [
+    "bin/seed.js",
+    "package.json",
+    "README.md",
+    "test/store.test.js"
+  ],
   "acceptance": [],
   "planned_route": [
     "plan",
