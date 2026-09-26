@@ -393,7 +393,31 @@
         "detail": "The case named 'the focus restore falls back to the first row, then to #group-name' cannot fail for any behavioural reason: it asserts that the source text contains the `||` chain, so it still passes if `rows.find` returns the wrong row, if the arms are in the wrong precedence, or if `.focus()` is called on something else entirely. It is a change-detector wearing a behaviour test's name — and the repo already has the mechanism to make it real, which this file does not use.\n\n`test/a11y-navigation.test.js:175`\n\nEvidence: The case is two `assert.match` calls against a string slice: `/rows\\.find\\(\\(row\\) => row\\.dataset\\.groupId === lastOpenedGroupId\\) \\|\\| rows\\[0\\] \\|\\| document\\.getElementById\\('group-name'\\)/` and `/if \\(target\\) target\\.focus\\(\\);/`. Nothing executes. The work order concedes this in residual_risks ('covered by a string assertion on the source, not by executing the code path ... only that it is written the way this plan specifies'), so this is not a plan deviation — it is the one place where the plan's own stated limitation is realised in shipped code. What makes it actionable: test/xss.test.js:125-133 already established how to actually run a client function in this repo — `clientFunction(name)` lifts the source out of the inline <script> and evaluates it — and it is used that way at :143-156, where `toPaise('9000')` is really called and really asserted to equal 900000. The blocker is only that the three-arm selection is written inline inside showCreateView's `.then()` callback (public/index.html:206-213) rather than as a named function, so there is nothing to lift. Extracting it (e.g. `function focusTargetFor(rows, groupId)`) puts four lines of pure logic behind a name the existing helper can evaluate, and the case would then assert returned targets against a stubbed row list — the only way the two fallback arms get the coverage AC-11 asks for.\n\nFix: Either extract the `rows.find(...) || rows[0] || document.getElementById('group-name')` expression into a named top-level function in public/index.html and test it through the existing clientFunction pattern, or rename the case to say what it is — 'the fallback chain is written as specified' — so the next reader does not read a passing green as proof the fallback works. The work order's residual_risks already flags that a delete route would need a real test; this is the change that would make that future test cheap."
       }
     ],
-    "pr": "31"
+    "pr": "31",
+    "qa": [
+      {
+        "id": "BUG-2",
+        "severity": "minor",
+        "area": "expense form",
+        "title": "Leaving a group while an expense save is in flight fires GET /api/groups/null/expenses and throws an unhandled Group not found",
+        "expected": "Backing out of the group view while a save is in flight should not issue a request for a null group id, and should not surface an unhandled error in the console.",
+        "actual": "Submit an expense, and leave the group view (back control) before the POST resolves. currentGroupId has already been set to null by showCreateView(), so the post-save refresh issues GET /api/groups/null/expenses, which returns 404 GROUP_NOT_FOUND, and the rejection from the un-awaited loadGroup() surfaces as an unhandled pageerror 'Group not found'.",
+        "repro": [
+          "Open a group and wait for it to load",
+          "Fill in a description and amount and submit the expense form",
+          "Before the POST resolves, activate the back control",
+          "Watch the network and console: GET /api/groups/null/expenses returns 404 and an unhandled Group not found is logged"
+        ],
+        "evidence": [
+          "qa-evidence/T-12-inflight-save.txt",
+          "qa-evidence/T-12-after-escape-mid-save.png",
+          "qa-evidence/baseline-null-group-base.json"
+        ],
+        "suspected_cause": "public/index.html expense submit handler: after await api(...) it calls loadGroup(currentGroupId) with the module-level currentGroupId, which showCreateView() nulls. The id is read after the await rather than captured before it. Pre-existing: the same request is issued on base commit b04e534, where the back control is a clickable span.",
+        "introduced_by_pr": false,
+        "reproducible": "always"
+      }
+    ]
   },
   "qa": {
     "verdict": "blocked",
