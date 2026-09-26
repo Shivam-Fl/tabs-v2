@@ -389,5 +389,32 @@
       }
     ],
     "pr": "31"
-  }
+  },
+  "qa": {
+    "verdict": "blocked",
+    "introduced_bugs": 1,
+    "ac_ids": [
+      "AC-1",
+      "AC-2",
+      "AC-3",
+      "AC-4",
+      "AC-5",
+      "AC-6",
+      "AC-7",
+      "AC-8",
+      "AC-9",
+      "AC-10",
+      "AC-11"
+    ],
+    "sha": "18407bca65bee5ab3ae7aa7e3bb84018f86e3860",
+    "run_id": "36271997384",
+    "work_order_version": 1,
+    "at": "2026-09-26T21:30:38.162Z"
+  },
+  "qa_open_bugs": [
+    {
+      "id": "BUG-1",
+      "title": "Focus jumps to the group heading when a slow group load resolves, pulling the caret out of the expense field the user is already typing in"
+    }
+  ]
 }
