@@ -100,6 +100,144 @@
   "stopped_at": null,
   "dispatched_stage": "plan",
   "validated_from": "plan",
-  "validated_at": "2026-09-26T07:57:48.610Z",
-  "validated_ac_changes": []
+  "validated_at": "2026-09-26T08:03:19.670Z",
+  "validated_ac_changes": [],
+  "validated_work_order": {
+    "issue": 23,
+    "version": 3,
+    "kind": "chore",
+    "mode": "committed",
+    "confidence": 88,
+    "confidence_rationale": "Every entry's version and date is read from the git history that wrote it — each of the seven CHANGELOG.md commits is a version bump whose diff was read for this plan — so the cut into six sections is not a guess. The target file was extracted programmatically from this work order (not retyped) and machine-checked against `git show main:CHANGELOG.md`: nine entries on each side, exactly four byte-identical including their line wrapping and five reworded, which is the 5/4 split the provenance list in files[0].change names; seven `##` headings at lines 3, 5, 15, 23, 30, 37, 53; seven `###` headings, three `### Added` and four `### Fixed`; and the mechanism-word grep returning nothing. Those three measurements were re-run for this revision, which differs from the last one only in deleting a diff-size figure that was wrong. Confidence is below 100 for two remaining readings rather than measurements: which category 0.0.1 belongs under (Added vs Fixed), and the category order inside 0.0.2, which is discussed in approach and is a one-line move either way.",
+    "understanding": "CHANGELOG.md has never been cut: all nine entries sit under a single `## Unreleased`, and because every release bump appended to the top of whichever section was already there, the file now has two `### Added` headings under Unreleased (lines 5 and 34), entries in reverse-chronological order (the balances/settlement feature sits above the fixes that made settlement correct), and entries that name mechanisms (a JSON file, 'the server', 'the next fetch') instead of behaviour. package.json has moved 0.0.1 -> 0.0.2 -> 0.0.3 -> 0.1.0 -> 0.1.1 -> 0.1.2, so six versions are already released and every one is recoverable from git: each bump commit is the diff that added that version's entries. Nothing reads this file — the release notes step writes to a GitHub draft release, not to CHANGELOG.md — so the change is confined to the record itself.",
+    "root_cause": "The release step appended each PR's entry to the top of an existing Unreleased section instead of opening a section for the version it had just bumped package.json to, and never converted the accumulated Unreleased into a dated version heading. Nine appends into one bucket, in reverse, produced the duplicate `### Added` and the inverted history.",
+    "approach": "Rewrite CHANGELOG.md from the git history rather than editing it in place. For each of the six bump commits, take the entries that commit's diff added and file them under that commit's version, dated by the commit's author date. Sections run newest first. Within a section, the categories run Added, then Changed, then Fixed — the conventional changelog order — and each appears at most once; 0.0.2 is the only section with two categories (its two commits are 90 seconds apart, one release, so category order is used there rather than literal commit order). Four of the nine entries carry over byte-for-byte, including their line wrapping; five are reworded to say what a person observes instead of what the code does, and those five may also have their line breaks moved. The 0.0.1 entry moves from Fixed to Added because it introduced the capability rather than repairing one. `## Unreleased` stays at the top with nothing under it, so the next entry has somewhere to go. The exact target file is written out below and is authoritative — the implementer writes it byte-for-byte and does not reinterpret it. This plan is a correction of v1. v1's pinned file is kept byte-for-byte — the file is the artifact the implementer writes from and QA checks against, so it is the authoritative half. The three sentences around it had the reword/unchanged split reversed relative to the file, and they now agree with the file and with each other. v1 also carried a check keyed to the shape of the diff, asserting that a correct change would show a particular number of changed bullets; that check has been deleted outright rather than restated, because reordering nine entries across six sections makes most of them look moved and a line count cannot tell a rewrap from a reword. No number from `git diff` appears anywhere in this work order. That is not modesty: reordering nine entries across six sections makes most of them look moved in the diff, so a line count cannot distinguish a rewrap from a reword from a lost entry, and QA has to compare sentences rather than lines. This is v3 and it moves nothing else: v2's pinned file is kept byte-for-byte, so the artifact the implementer writes is the same one the two previous plans were reviewed against, and the 5/4 sentence split, the heading structure and the entry count were re-measured against main for this version and are unchanged. What v2 got wrong was a diff size it quoted for that file in three places; the size is deleted everywhere rather than corrected in all three, because a correct number standing where a wrong one did would still be a number doing work it cannot do.",
+    "files": [
+      {
+        "path": "CHANGELOG.md",
+        "action": "edit",
+        "why": "The only file the ticket is about, and the only one it needs. Nothing in src/, public/, test/ or bin/ reads it.",
+        "change": "Replace the whole file with exactly this content — 9 entries, 6 version sections, newest first, plus an empty Unreleased at the top. Write it byte-for-byte; do not re-wrap lines and do not add a trailing section. The file ends with `reload.` followed by exactly one newline character, the way the current file ends:\n\n# Changelog\n\n## Unreleased\n\n## 0.1.2 - 2026-09-22\n\n### Fixed\n\n- Adding two expenses at the same time no longer loses one — both are still there when the\n  group is reloaded.\n\n- When two people mark a settlement done at the same time, both are kept instead of one\n  being dropped silently.\n\n## 0.1.1 - 2026-09-22\n\n### Fixed\n\n- Marking a settlement done now updates everyone's balances to reflect it, the done state\n  survives a page reload, and marking the same settlement twice is rejected rather than\n  double-counting it.\n\n## 0.1.0 - 2026-09-21\n\n### Added\n\n- See who owes what in a group — each member's balance (owed, even, or owes) and the\n  fewest transfers needed to settle up.\n\n## 0.0.3 - 2026-09-21\n\n### Fixed\n\n- Error messages on the expense form now clear as soon as you edit the field they were\n  about, instead of lingering on screen until the next submit attempt.\n\n## 0.0.2 - 2026-09-21\n\n### Added\n\n- Split an expense by custom shares — assign each member a share count and divide the total\n  proportionally. Zero shares exclude a member from the split. Existing equal-split expenses\n  render unchanged.\n\n### Fixed\n\n- Rapidly submitting the create-group form no longer creates duplicate groups with the same\n  name.\n\n- Creating a group whose name matches an existing one is rejected — names are compared with\n  case and surrounding whitespace ignored, so \"Goa Trip\" and \" goa trip \" cannot both exist.\n\n## 0.0.1 - 2026-09-21\n\n### Added\n\n- Create a group, add members, and record expenses split equally between them. Groups and\n  their expenses are still there after a page reload.\n\nThe nine after-sentences above are the nine claims, in the order they now read. Provenance of every entry (commit = the version bump whose diff added it):\n\n- 0.0.1 (3ee0811, 2026-09-21) — 'Can create a group, add members, and record expenses split equally between them. State persists across page reloads via a JSON file.' REWORDED (drops 'via a JSON file', gains the observable promise it replaced) and MOVED from Fixed to Added: it introduced the capability, it did not repair one, and Unreleased had no other section to put it in when it was written.\n- 0.0.2 (224fb34, 2026-09-21) — 'Rapidly submitting the create-group form no longer creates duplicate groups with the same name.' VERBATIM, byte-for-byte including its line wrap. 'The server now rejects a new group whose name matches an existing group when compared case-insensitively and with whitespace trimmed.' REWORDED: 'The server' is replaced with 'Creating a group', and the comparison rule is kept because it is what makes 'Goa Trip' and ' goa trip ' collide — with a concrete example added, since the rule alone is not a thing a reader can picture.\n- 0.0.2 (db18ec4, 2026-09-21) — 'Split an expense by custom shares...' VERBATIM, byte-for-byte including its line wrap, filed under Added (it is the entry that was stranded below the Fixed block).\n- 0.0.3 (bc4051c, 2026-09-21) — 'Error messages on the expense form now clear...' VERBATIM, byte-for-byte including its line wrap.\n- 0.1.0 (bf51ba6, 2026-09-21) — 'See who owes what in a group...' VERBATIM, byte-for-byte including its line wrap, filed under Added.\n- 0.1.1 (ed63821, 2026-09-22) — 'Marking a settlement done now updates everyone's balances...' REWORDED: 'and attempting to mark the same settlement twice is rejected' becomes 'and marking the same settlement twice is rejected', and the last two lines are re-wrapped to match. The three promises in the entry (balances update, done state survives a reload, double-marking rejected) are all unchanged; only the phrasing of the third and the wrapping move.\n- 0.1.2 (1761768, 2026-09-22) — 'Adding two expenses at the same time no longer loses one — both are persisted and returned on the next fetch.' REWORDED to 'both are still there when the group is reloaded' (same promise, no store vocabulary), and re-wrapped. 'Marking a settlement no longer gets silently dropped when two people record one at the same time — both are saved.' REWORDED to lead with the person, not the mechanism: 'When two people mark a settlement done at the same time, both are kept instead of one being dropped silently.'\n\nResult, and this is the number QA checks: FIVE entries reworded (0.0.1, the 0.0.2 name-collision entry, 0.1.1, and both 0.1.2 entries), FOUR byte-identical to main including line wrapping (See who owes what / 0.1.0, Split an expense by custom shares / 0.0.2, Error messages on the expense form / 0.0.3, Rapidly submitting the create-group form / 0.0.2). Nine entries before, nine after. The same 5/4 split appears in approach and in qa_script step 6, and the provenance list above is the authority for it."
+      }
+    ],
+    "tests": [],
+    "acceptance": [
+      {
+        "id": "AC-1",
+        "check": "CHANGELOG.md holds one section per released version, newest first, in the order 0.1.2, 0.1.1, 0.1.0, 0.0.3, 0.0.2, 0.0.1, each heading exactly `## <version> - <YYYY-MM-DD>`, above an empty `## Unreleased` at the top of the file.",
+        "how_to_verify": "grep -n '^## ' CHANGELOG.md — expect, in this order and on these lines: `3:## Unreleased`, `5:## 0.1.2 - 2026-09-22`, `15:## 0.1.1 - 2026-09-22`, `23:## 0.1.0 - 2026-09-21`, `30:## 0.0.3 - 2026-09-21`, `37:## 0.0.2 - 2026-09-21`, `53:## 0.0.1 - 2026-09-21`."
+      },
+      {
+        "id": "AC-2",
+        "check": "No `###` heading appears twice inside any one version section, and no section has an empty subsection heading.",
+        "how_to_verify": "Read the file top to bottom. Expected shape: 0.1.2 Fixed; 0.1.1 Fixed; 0.1.0 Added; 0.0.3 Fixed; 0.0.2 Added then Fixed; 0.0.1 Added. That is `grep -c '^### ' CHANGELOG.md` = 7, of which `grep -c '^### Added'` = 3 and `grep -c '^### Fixed'` = 4, and no string appears twice between the same pair of `## ` lines. On main the same greps give 3 headings, two of them `### Added` under a single `## Unreleased`."
+      },
+      {
+        "id": "AC-3",
+        "check": "The same nine claims are present as before, none added and none dropped, and within a version they run newest-category-first — so 0.1.2 lists the concurrent-expense fix before the concurrent-settlement fix, and the balances feature sits in 0.1.0, below the settlement fixes of 0.1.1 and 0.1.2 rather than above them.",
+        "how_to_verify": "`grep -c '^- ' CHANGELOG.md` is 9 (it is 9 on main today). Then match each of the nine bullets against the nine after-sentences written out in files[0].change."
+      },
+      {
+        "id": "AC-4",
+        "check": "Exactly five of the nine entries are reworded from main and exactly four are byte-identical to it, line wrapping included: byte-identical are 'See who owes what in a group...', 'Split an expense by custom shares...', 'Error messages on the expense form now clear...', and 'Rapidly submitting the create-group form...'. The five reworded are the 0.0.1 create-group entry, the 0.0.2 name-collision entry, the 0.1.1 settlement-done entry, and both 0.1.2 entries.",
+        "how_to_verify": "Compare the nine after-sentences in files[0].change with the nine bullets on main (`git show main:CHANGELOG.md`), sentence by sentence, not line by line — the reordering makes most entries look moved. This criterion is a per-entry sentence match; no number taken from `git diff` is a valid check for it, in either direction. (The previous revision of this work order quoted one, and it was wrong.)"
+      },
+      {
+        "id": "AC-5",
+        "check": "Every entry describes something a person can observe: no entry names a JSON file, a store, or 'the server', and none explains an implementation.",
+        "how_to_verify": "grep -n -i -E 'json file|store|server|write path|persisted' CHANGELOG.md returns nothing. (On main it returns three hits: 'via a JSON file', 'the next fetch' and 'The server now rejects'.)"
+      },
+      {
+        "id": "AC-6",
+        "check": "The 0.0.1 entry sits under `### Added`, not under a heading describing a repair.",
+        "how_to_verify": "Read the 0.0.1 section: it has one `### Added` and no `### Fixed`."
+      },
+      {
+        "id": "AC-7",
+        "check": "Every version heading is a version string package.json has actually held — 0.0.1, 0.0.2, 0.0.3, 0.1.0, 0.1.1, 0.1.2 — and the newest section, 0.1.2, matches the version in package.json today.",
+        "how_to_verify": "`grep '\"version\"' package.json` prints 0.1.2, and `git log -p --follow -- package.json | grep '\"version\"'` shows the 0.0.1 -> 0.0.2 -> 0.0.3 -> 0.1.0 -> 0.1.1 -> 0.1.2 sequence. No heading invents a version that is not in that sequence."
+      },
+      {
+        "id": "AC-8",
+        "check": "Nothing that reads or serves the app changed: the app still boots and answers, and the test suite still passes.",
+        "how_to_verify": "`npm run sdlc:verify` reports `# fail 0` (149 tests pass on main today, so expect 149), and `npm run sdlc:serve` in the background then `curl -sf http://localhost:3000/` exits 0. `git diff --stat` names CHANGELOG.md and nothing else.",
+        "verify": "test"
+      }
+    ],
+    "qa_script": [
+      "Read CHANGELOG.md in the PR diff in full, not just the diff hunks — the defect being fixed is the shape of the whole file, which no single hunk shows.",
+      "`grep -c '^- ' CHANGELOG.md` — must be 9. It is 9 on main, so a different number means an entry was lost or invented during the rewrite.",
+      "`grep -n '^## ' CHANGELOG.md` — the seven headings in the order AC-1 names, with the dates given there.",
+      "`grep -n '^### ' CHANGELOG.md` — seven lines: three `### Added` (0.1.0, 0.0.2, 0.0.1) and four `### Fixed` (0.1.2, 0.1.1, 0.0.3, 0.0.2), none repeated inside a section. On main the same grep gives three lines with `### Added` twice.",
+      "`grep -n -i -E 'json file|store|server|persisted' CHANGELOG.md` — must return nothing (AC-5).",
+      "Match all nine bullets against the nine after-sentences in files[0].change: exactly FIVE differ in wording and exactly FOUR are byte-identical to main, line wrapping included. The four are 'See who owes what in a group...', 'Split an expense by custom shares...', 'Error messages on the expense form now clear...', and 'Rapidly submitting the create-group form...'. Do NOT check this by diff shape: the reordering makes most entries look moved in the diff, and a line count cannot tell a rewrap from a reword, so it misjudges them. No number from `git diff` is part of this check. `git show main:CHANGELOG.md` side by side with the new file is the reliable read (AC-4).",
+      "Check the reading order end to end: the balances-and-settlement entry appears in 0.1.0, below the 0.1.1 settlement-done fix and the 0.1.2 concurrency fixes, so the record reads oldest-first as history rather than newest-first as a feature list.",
+      "`git diff --stat main` — CHANGELOG.md only.",
+      "`npm run sdlc:verify` — `# fail 0` (AC-8). The file is read by no code, so the suite passing is the check that nothing else moved."
+    ],
+    "risks": [
+      "Losing an entry while reordering is the real risk the ticket names, and it is why the count is pinned at 9 in three places (AC-3, qa_script step 2, and the nine-way sentence match in qa_script step 6).",
+      "Five entries change wording, so a reviewer diffing line-by-line will see churn that is not a loss. The before/after pairs are named in files[0].change so this is checkable rather than argued. The four byte-identical entries are also named, so a change to one of them is caught as easily as a lost entry.",
+      "The 0.1.2 entries and the 0.1.1 entry are re-wrapped as well as reworded. That is why AC-4 and qa_script step 6 compare sentences, not lines, and why the byte-identity claim is scoped to the four entries that did not change at all.",
+      "The empty `## Unreleased` section is deliberate, not an oversight: it is where the next entry goes, and it is the shape the release step appends against. Say so in the PR body so it is not 'fixed' later.",
+      "The dates come from the author dates of the version-bump commits (2026-09-21 and 2026-09-22) because the repository has no tags at all (`git tag` is empty). They are accurate for when the version was cut, and no release date exists to contradict them.",
+      "Nothing here touches forbidden_paths: CHANGELOG.md is a single root-level file, and .sdlc/config.yml (release.changelog) is deliberately left alone. No host is added to env.api_allowlist, and the app talks to no new destination."
+    ],
+    "out_of_scope": [
+      "Cutting or tagging a release. 0.1.2 already exists as a package.json version; whether it is published and tagged is a separate decision, and release.auto_tag is off.",
+      "Writing any entry that is not already in the file. The changelog records what shipped; the spec's unbuilt features are #21's business.",
+      "A test that asserts the changelog's structure. Nothing in the repo reads this file, and a structural test would fail the moment the next entry is appended — it would be decoration that costs more than it catches. Verification is the grep checks in qa_script instead.",
+      "Back-filling a 0.0.0 section, or inventing a version for the pre-0.0.1 commits. The six versions package.json actually held are the six sections.",
+      "Editing .sdlc/config.yml, including release.changelog, which already points at this file and is in forbidden_paths."
+    ],
+    "evidence": [
+      "CHANGELOG.md on main: 9 bullet lines, one `## Unreleased`, and three `###` headings of which two are `### Added` (lines 5 and 34), the second sitting below the `### Fixed` block that starts at line 10.",
+      "git log --follow -- CHANGELOG.md shows exactly seven commits, each a version bump: 3ee0811 (0.0.1), 224fb34 (0.0.2), db18ec4 (0.0.2), bc4051c (0.0.3), bf51ba6 (0.1.0), ed63821 (0.1.1), 1761768 (0.1.2). Each one's diff is the provenance for the version its entries are filed under; all seven were read for this plan.",
+      "The 5/4 split in AC-4 was computed, not estimated. Reconstructing the target file from files[0].change and machine-comparing its nine entries against `git show main:CHANGELOG.md`, normalising whitespace within each entry: 4 entries match word-for-word, 5 differ. A separate check on block equality including the line breaks returns IDENTICAL for exactly those same four ('See who owes what', 'Error messages on the expense form', 'Rapidly submitting the create-group form', 'Split an expense by custom shares'). This corrects v1, which stated 4/5 in the opposite direction in three places while its own pinned file said otherwise.",
+      "Structure of the target file was checked the same way: 9 bullets, 7 `##` headings in the order AC-1 names (at lines 3, 5, 15, 23, 30, 37, 53), 7 `###` headings of which 3 are `### Added` and 4 are `### Fixed`, and `grep -i -E 'json file|store|server|write path|persisted'` returns nothing.",
+      "`git tag` returns nothing, so no tag dates exist; the seven commit author dates run 2026-09-21 20:03 through 2026-09-22 10:43, giving the 2026-09-21 / 2026-09-22 dates used in the headings.",
+      "package.json on main is version 0.1.2; `git log -p --follow -- package.json` shows the 0.0.1 -> 0.0.2 -> 0.0.3 -> 0.1.0 -> 0.1.1 -> 0.1.2 sequence.",
+      "Nothing reads the file: grep for CHANGELOG/changelog over the repo hits only .sdlc/config.yml (`release.changelog`), a non-product-path regex in .sdlc/bin/lib/project.js:225, and comments in .sdlc/bin/publish-release-notes.mjs and .github/workflows/sdlc-release.yml — the release path writes release notes to a GitHub draft release, not to this file.",
+      "`npm run sdlc:verify` on main: 149 tests, 149 pass, 0 fail, so the suite is green and a docs-only diff cannot plausibly affect it.",
+      "The plan-review objection to v2 was correct and is corrected here. v2 quoted a diff size for this change in three places — `approach`, AC-4's `how_to_verify`, and `qa_script` step 6 — and the size was wrong. Measured on the file pinned in `files[0].change`, extracted programmatically rather than retyped and compared with `git show main:CHANGELOG.md`, the quoted numbers are not reproducible under any whitespace convention, and the size predates the re-wrapping of the 0.1.1 and both 0.1.2 entries. It is deleted rather than corrected in all three places, because this plan's own reasoning is that no diff shape is a valid check for a reorder-and-rewrap: restating a correct number where a wrong one stood would leave the number doing work it cannot do. This is recorded here as a correction and appears nowhere in this work order as a check.",
+      "Independent re-verification for this revision, run against the file pinned in files[0].change and not against a retyped copy: `grep -n '^## '` returns lines 3, 5, 15, 23, 30, 37, 53 exactly as AC-1 names them; `grep -c '^- '` is 9; `grep -c '^### '` is 7 with 3 `### Added` and 4 `### Fixed`; `grep -i -E 'json file|store|server|write path|persisted'` returns nothing against three hits on main; and a per-entry comparison of the nine entries, exact including line breaks, returns 4 identical and 5 differing — the same four AC-4 names and the same five.",
+      "`npm run sdlc:verify` on main: 149 tests, 149 pass, 0 fail, so the 149 AC-8 expects is the count on this branch today. Nothing outside CHANGELOG.md reads or writes the file — grep for 'changelog' over the repo hits only .sdlc/config.yml (release.changelog), the non-product-path regex in .sdlc/bin/lib/project.js:225, comments in .sdlc/bin/publish-release-notes.mjs and .github/workflows/sdlc-release.yml, and this plan's own brief."
+    ],
+    "alternatives_considered": [
+      {
+        "approach": "Cut only 0.1.0, 0.1.1 and 0.1.2 — the versions the ticket's complaint names",
+        "rejected_because": "It produces a file where the oldest four entries are still called unreleased, and it contradicts the ticket's own requirement that 'the versions already released are cut from what is in Unreleased'. 0.0.1 through 0.0.3 are recorded in package.json history exactly as 0.1.x is; singling three of six out is not defensible from the history."
+      },
+      {
+        "approach": "Edit the file in place — move the stranded `### Added` block up, reverse the entry order, and insert dated version headings where the boundaries fall.",
+        "rejected_because": "Reordering nine entries across six version boundaries by hand is exactly where an entry gets dropped, which the ticket names as the one real risk. Writing the file out from the git provenance removes the chance: the target content is in the work order, byte-for-byte."
+      },
+      {
+        "approach": "Delete the mechanism-flavoured wording but keep the create-group entry under `### Fixed`, since that is the heading it was originally filed under.",
+        "rejected_because": "It records 0.0.1 as a repair when it was the first thing the product could do, and the ticket asks that entries sit under a heading that matches what they describe. The change of section is called out in the PR body rather than made silently."
+      },
+      {
+        "approach": "Leave the 0.1.1 entry word-for-word alone ('attempting to mark the same settlement twice is rejected'), which would make exactly four entries differ and let v1's original 4/5 counts stand.",
+        "rejected_because": "This is the objection's option (b) and it is a defensible way to make the numbers agree — but it means editing the pinned file rather than the sentences around it, and the file is the artifact the implementer writes from and QA checks against. Keeping the file as v1 wrote it and fixing the three sentences is the smaller correction: the file is authoritative by construction, and 'marking' reads consistently with the rest of the entry. Either way the count is now stated as 5/4 in approach, in the Result line, in AC-4 and in qa_script step 6, and the four byte-identical entries are named so the claim is checkable rather than asserted."
+      },
+      {
+        "approach": "Drop `## Unreleased` entirely now that nothing is pending.",
+        "rejected_because": "It removes the only place the next contributor appends, and the next person would then add an entry at the bottom of a released section. An empty heading at the top costs one line and keeps the file in the shape the release step writes into."
+      },
+      {
+        "approach": "Add `node --test` coverage asserting one heading per version and no duplicate subsection.",
+        "rejected_because": "Nothing in the repo reads CHANGELOG.md, and any structural assertion breaks on the next appended entry — the test's first failure would be a false alarm, and the second would be ignored. The checks belong in the QA script for this ticket, not in CI forever."
+      }
+    ],
+    "assumptions": [
+      "A version bump commit defines a release. Each of the six versions in package.json's history got a dedicated bump commit whose message names the version, so 'released' is read as 'the version was cut', not 'a git tag exists' — there are no tags, and the ticket says tagging 0.1.2 is a separate decision.",
+      "Where an entry was added by a commit that bumped a version already bumped earlier that day, it is that version's entry: 224fb34 (20:31) and db18ec4 (20:32) both bump to 0.0.2, and both sets of entries are filed under 0.0.2.",
+      "Within a version section that has more than one category, the categories are ordered Added, then Changed, then Fixed, rather than by commit timestamp. This affects 0.0.2 only, where db18ec4's Added entry landed 90 seconds after 224fb34's Fixed entries; the two commits are one release 90 seconds apart, and category order is what makes a section scannable.",
+      "The nine current bullets are the complete set of entries. No earlier entry was deleted from the file's history — the seven commits' diffs account for all nine."
+    ],
+    "unknowns": [
+      "Whether the maintainer wants an empty `## Unreleased` kept at the top. It is the conventional choice and the one that leaves the file ready for the next entry, but it is a formatting preference rather than something the ticket settles; it is called out in risks and the PR body so it is easy to change in review.",
+      "Whether 0.0.1's entry belongs under Added or Fixed is a reading of the record, not a fact in it. The plan files it under Added and says so; if the maintainer disagrees it is a one-line move that changes neither the entry count nor any other criterion."
+    ]
+  }
 }
