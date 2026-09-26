@@ -18,7 +18,168 @@
   },
   "halted": null,
   "pending": null,
-  "work_order": null,
+  "work_order": {
+    "issue": 28,
+    "version": 1,
+    "kind": "bug",
+    "understanding": "bin/seed.js calls store.reset() unconditionally at line 9, before it builds anything. reset() (src/store.js:34-39) unlinks the store file, and the script then writes a store containing only the synthetic 'Goa trip' group. Because a Tabs installation is exactly one JSON file, running the documented `npm run sdlc:seed` on a checkout with real groups in it destroys the entire dataset with no prompt, no confirmation, no backup and no undo. In the QA container the store is ephemeral so the reset is right; the defect is that the unconditional reset is the ONLY behaviour the command has, so the command that .sdlc/memory/project.md and .sdlc/memory/qa/environment.md tell people to run is a data-loss command everywhere else. Reproduced: in a scratch dir with data/groups.json holding a group 'Flat share', `node bin/seed.js` left a file containing only 'seed-goa' and the message 'Seed written to data/groups.json'. The store module already resolves STORE_PATH when set and data/groups.json relative to cwd otherwise (src/store.js:4-8), so the write location the QA workflow depends on is already correct and needs a regression test, not a change; the change is the guard plus naming the destructive path.",
+    "root_cause": "bin/seed.js treated 'wipe the store' as a precondition of seeding rather than as an opt-in choice, and the flag that would have made it a choice did not exist. The store's own reset() is correct and stays; the caller is what is wrong.",
+    "reproduced": true,
+    "evidence": [
+      "Ran `node bin/seed.js` in an empty /tmp/seedcheck containing data/groups.json = {\"my-real-group\":{...}}. After the run the file contained only \"seed-goa\"; the pre-existing group was gone. Exit code 0, no warning printed.",
+      "The only stdout was `Seed written to data/groups.json`, which names the file it wrote and says nothing about the data it deleted.",
+      "package.json `sdlc:seed` is `node bin/seed.js` with no flag, no description, and no companion script — grep for 'seed' across the repo finds no other caller and no other guard.",
+      "test/domain.test.js:401 runs the real script via execFileSync against a fresh tmp STORE_PATH and asserts Object.keys(data) deepStrictEqual ['seed-goa']; it passes today and must keep passing, which is why this is a merge, not a refusal."
+    ],
+    "approach": "Turn the wipe into an opt-in `--force` and make the default path a merge. The default reads the existing store, adds (or replaces in place) the `seed-goa` group, and writes the union — so nothing is destroyed and QA's fresh-container behaviour is byte-for-byte what it is today, because an empty store merges to exactly {seed-goa}. `--force` calls store.reset() first so the store ends up holding the fixture alone, which is the reset QA's ephemeral container wants and the reason reset() exists. Three things make the choice readable before anyone runs it: the script prints a one-line statement of what it is about to do with existing data on every run, `--help` prints the full contract, and package.json gains a companion `sdlc:seed:force` script so the destructive path is visible in `npm run` output rather than being a flag buried in a comment. One guard the issue does not name but the store's own invariant requires: the API rejects a duplicate group name (GROUP_NAME_TAKEN, src/server.js), so a merge that added 'Goa trip' beside an existing group of that name would write a store the API could not have produced — the same class of defect the #7 review caught when the seed hand-built its group. In that one case the seed writes nothing, says exactly why, and exits 0. Exit 0 rather than non-zero is deliberate: the QA workflow runs `npm run sdlc:seed` with `continue-on-error: true` and never reads its output, so a non-zero exit would silently cost QA its fixtures and the next failure would read as a product bug. The clash is unreachable in a fresh container (only the seed writes before the browser opens), and when it does happen the store already holds a group called 'Goa trip'.",
+    "files": [
+      {
+        "path": "bin/seed.js",
+        "action": "edit",
+        "change": "Replace the unconditional `store.reset(); // Clear existing data` (line 9) with argument parsing and a merge/force branch. Import `path` is NOT needed — keep the existing target string `process.env.STORE_PATH || 'data/groups.json'` exactly as it is today, since src/store.js already resolves that the same way and the printed path is what an operator reads before trusting the command.\n\n1. Constants at the top, after the imports:\n   const SEED_ID = 'seed-goa';\n   const SEED_NAME = 'Goa trip';\n   const FORCE = '--force';\n\n2. USAGE — a template literal, printed verbatim by --help:\n   `Usage: node bin/seed.js [--force]\n\n   Writes the \"${SEED_NAME}\" demo fixture into the store.\n\n     (no options)  Existing groups are KEPT. The fixture is added alongside them, and an\n                   earlier fixture of the same id is replaced in place, so running this twice\n                   does not duplicate anything. If a DIFFERENT group is already named\n                   \"${SEED_NAME}\" nothing is written and this explains why.\n     --force       DESTRUCTIVE. Every existing group is deleted first, so the store ends up\n                   holding the fixture and nothing else. There is no backup and no undo.\n     -h, --help    Print this and exit 0 without touching the store.`\n\n3. Argument handling, before any store call:\n   const args = process.argv.slice(2);\n   if (args.includes('-h') || args.includes('--help')) { console.log(USAGE); process.exit(0); }\n   const unknown = args.filter((a) => a !== FORCE);\n   if (unknown.length > 0) {\n     console.error(`Unknown option: ${unknown.join(' ')}`);\n     console.error(USAGE);\n     process.exit(2);\n   }\n   const force = args.includes(FORCE);\n   const target = process.env.STORE_PATH || 'data/groups.json';\n\n4. Build the fixture exactly as today — keep the existing comment block about going through createGroup, the `{ ...createGroup({ name: SEED_NAME, members: ['Asha', 'Rahul', 'Meera'] }), id: SEED_ID }` construction, the two addExpense calls (Hotel 900000 paid by Asha, Dinner 450000 paid by Rahul, both split across all three), and the comment explaining that the id override is the only deviation from the live path. Nothing about the fixture's contents changes in this ticket.\n\n5. Replace the write, after the fixture is built, with:\n   const store = createStore();\n   if (force) {\n     const existing = store.load();\n     const removed = Object.keys(existing).length;\n     store.reset();\n     const data = {};\n     data[SEED_ID] = fixture;\n     store.save(data);\n     console.log(`Wrote \"${SEED_NAME}\" to ${target} — deleted ${removed} existing group(s) (--force).`);\n   } else {\n     console.log(`Seeding \"${SEED_NAME}\" into ${target} — existing groups are kept.`);\n     const existing = store.load();\n     const clash = Object.values(existing).find(\n       (g) => g && g.id !== SEED_ID && typeof g.name === 'string'\n         && g.name.trim().toLowerCase() === SEED_NAME.toLowerCase(),\n     );\n     if (clash) {\n       console.log(`Not seeded: a group named \"${SEED_NAME}\" already exists (id ${clash.id}).`);\n       console.log('Nothing was written and nothing was deleted. To delete it and write the fixture, re-run with --force.');\n       process.exit(0);\n     }\n     const data = { ...existing, [SEED_ID]: fixture };\n     store.save(data);\n     console.log(`Wrote \"${SEED_NAME}\" (${SEED_ID}) to ${target} — ${Object.keys(existing).length} existing group(s) left in place.`);\n   }\n   where `fixture` is the variable name for the g2 group object the script already builds. Name it that; do not leave the old `const data = {}; data[g2.id] = g2;` shape in the non-force branch, which is the overwrite this ticket exists to remove.\n\n6. The `console.log(`Seed written to ${...}`)` line at the end of the file is removed — its message is replaced by the lines above. Nothing else in the file changes: imports, the fixture construction and its comments stay as they are.",
+        "why": "The only code in the product that destroys a user's data, reachable by following the documentation. Everything else in this ticket is making the behaviour here readable."
+      },
+      {
+        "path": "package.json",
+        "action": "edit",
+        "change": "Add one line to `scripts`, directly after the existing `\"sdlc:seed\": \"node bin/seed.js\",`:\n  \"sdlc:seed:force\": \"node bin/seed.js --force\",\nNothing else in package.json changes. Keep the key `sdlc:seed` exactly as it is — the QA workflow greps for it (`.github/workflows/sdlc-qa.yml:350`, `scripts?.['sdlc:seed']`) and renames or removes it and QA provisions its own fixtures instead. The new script is what puts the destructive path, and the fact that it is destructive, into the output of a bare `npm run` — the place a person actually looks before running anything.",
+        "why": "'The command's description says what happens to existing data' has to live somewhere writable. .sdlc/memory/project.md is the repo's own home for command docs and is off-limits to this pipeline, and docs/spec/** may not be edited, so a named companion script is the honest way to make the destructive option visible."
+      },
+      {
+        "path": "README.md",
+        "action": "edit",
+        "change": "Add a `## Commands` section after the existing two lines, listing the four npm scripts and their effect, with the seed described in full:\n\n  ## Commands\n\n  | Command | What it does |\n  |---|---|\n  | `npm run sdlc:verify` | Runs the test suite (`node --test`). |\n  | `npm run sdlc:serve` | Serves the app on http://localhost:3000. |\n  | `npm run sdlc:seed` | Writes a demo group, \"Goa trip\", into the store. **Existing groups are kept** — the fixture is added alongside them. |\n  | `npm run sdlc:seed:force` | Same, but **deletes every existing group first**. Destructive, with no backup and no undo. |\n  | `npm run sdlc:ready` | Curl check that the server is answering. |\n\n  Then one paragraph under it:\n\n  The store is a single JSON file — `data/groups.json`, or `$STORE_PATH` when that is set — and it is the whole of a Tabs installation. `npm run sdlc:seed` never deletes anything; if you want the store to hold the demo group and nothing else, run `npm run sdlc:seed:force`, which unlinks the file first. `node bin/seed.js --help` prints the same contract from the script itself.",
+        "why": "A command's description is only useful where somebody reads it before running it, and this README is the only written surface a checkout's reader is guaranteed to open. The project brief and the QA environment notes already say the same things but are under .sdlc/, which no agent may edit."
+      }
+    ],
+    "tests": [
+      {
+        "path": "test/store.test.js",
+        "action": "edit",
+        "cases": [
+          "seeding over a store that already holds a group keeps that group and adds the fixture: write a group 'Flat share' with id 'flat-share' via the file store, execFileSync the real bin/seed.js with STORE_PATH pointed at it, then assert the resulting JSON has both keys 'flat-share' and 'seed-goa' and that data['flat-share'] deepStrictEquals the object written before the run",
+          "seeding into an empty store writes only the fixture: STORE_PATH at a fresh path that does not exist, assert the file exists and Object.keys() deepStrictEquals ['seed-goa'] — the fresh-run path QA depends on is never refused",
+          "--force deletes every existing group and leaves only the fixture: same setup as the first case, run with ['--force'], assert Object.keys() deepStrictEquals ['seed-goa'] and 'flat-share' is gone",
+          "the default run over a store that already holds the fixture replaces it in place and does not duplicate it: seed twice, assert the store still has exactly ['flat-share', 'seed-goa'] and the fixture still has the two seeded expenses in order",
+          "a pre-existing group named 'Goa trip' under a different id stops the seed writing a second one: write a group with id 'other-goa' and name 'Goa trip', run the seed, assert the process exits 0, Object.keys() deepStrictEquals ['other-goa'] (no 'seed-goa' added, nothing deleted), and stdout names the clash and the --force remedy",
+          "the seed writes to data/groups.json relative to the working directory when STORE_PATH is unset: execFileSync the script with cwd set to a fresh mkdtemp directory and STORE_PATH deleted from the child env, assert <tmpDir>/data/groups.json exists and holds 'seed-goa', and that nothing was written outside that temp directory",
+          "the seed's own output states what it does to existing data: capture stdout of a default run over a store holding one group and assert it contains the target path, the words 'existing groups are kept', and the number of groups left in place; capture the --force run and assert it says the groups were deleted and names --force",
+          "--help prints the usage and writes nothing: assert exit code 0, stdout contains '--force' and 'DESTRUCTIVE', and the store file is byte-identical to what it was before the run",
+          "an unrecognised option is refused with exit code 2 and writes nothing: run with ['--focre'] against a store holding one group, assert exit 2, stderr names the unknown option, and the store file is unchanged"
+        ]
+      }
+    ],
+    "acceptance": [
+      {
+        "id": "AC-1",
+        "check": "With a group already saved in the store, running the seed command leaves that group in place and adds the seeded 'Goa trip' group beside it — the group list on the home screen shows both after a reload, and neither one's balances changed.",
+        "verify": "browser"
+      },
+      {
+        "id": "AC-2",
+        "check": "The seeded 'Goa trip' group is not the only group in the store after a plain `npm run sdlc:seed` on a store that already had data: the pre-existing group is still listed, openable, and shows the same expenses and balances it did before the seed ran.",
+        "verify": "browser"
+      },
+      {
+        "id": "AC-3",
+        "check": "Deleting every group is opt-in and named: `npm run sdlc:seed:force` (or `node bin/seed.js --force`) is the only documented way to wipe, and after it the home screen lists 'Goa trip' and nothing else.",
+        "verify": "browser"
+      },
+      {
+        "id": "AC-4",
+        "check": "`npm run sdlc:seed` followed by `npm run sdlc:serve` on a clean checkout shows the seeded group: the home screen lists 'Goa trip', opening it shows Hotel ₹9,000 paid by Asha and Dinner ₹4,500 paid by Rahul, and its balances are Asha +₹4,500, Rahul ₹0, Meera −₹4,500.",
+        "verify": "browser"
+      },
+      {
+        "id": "AC-5",
+        "check": "Seeding into a store that holds nothing still writes the fixture and does not fail or exit non-zero — a fresh QA run is never refused its fixtures.",
+        "verify": "test",
+        "how_to_verify": "test/store.test.js case 'seeding into an empty store writes only the fixture' (CI runs `npm run sdlc:verify`). Also confirmed in the browser by AC-4, which is the same path on a clean checkout."
+      },
+      {
+        "id": "AC-6",
+        "check": "The seed command's own output says what it does to existing data, both ways: a default run says existing groups are kept, a --force run says how many it deleted, and both name the store file they wrote.",
+        "verify": "test",
+        "how_to_verify": "test/store.test.js case \"the seed's own output states what it does to existing data\" — stdout is captured from a real run of the script over a store holding one group, once without the flag and once with it."
+      },
+      {
+        "id": "AC-7",
+        "check": "The fixture lands where the QA workflow reads it: with STORE_PATH set it is written to that path, and with STORE_PATH unset it is written to data/groups.json relative to the working directory.",
+        "verify": "test",
+        "how_to_verify": "test/store.test.js case 'the seed writes to data/groups.json relative to the working directory when STORE_PATH is unset' (the STORE_PATH-set half is already covered by the case that seeds into a fresh path). AC-4 is the same behaviour observed through the running app."
+      },
+      {
+        "id": "AC-8",
+        "check": "Running the seed twice over the same store leaves exactly one seeded group, and a group that already exists under a different id is never replaced or duplicated by name.",
+        "verify": "test",
+        "how_to_verify": "test/store.test.js cases 'the default run over a store that already holds the fixture replaces it in place and does not duplicate it' and \"a pre-existing group named 'Goa trip' under a different id stops the seed writing a second one\"."
+      }
+    ],
+    "qa_script": [
+      "npm run sdlc:verify — expect green, including the new bin/seed.js cases in test/store.test.js.",
+      "Confirm the diff touches only bin/seed.js, package.json, README.md and test/store.test.js: `git diff --stat main...HEAD`. Nothing under .sdlc/ or .github/ may appear.",
+      "The app is already booted by the workflow and the workflow has already run `npm run sdlc:seed`. Open http://localhost:3000 and note the group list.",
+      "Create a group through the UI: name 'Flat share', members Alice and Bob, one expense. Confirm it is listed.",
+      "By hand, in the same working directory the app runs in, run `npm run sdlc:seed` and read its stdout: it must name the store file and say existing groups are kept. The workflow ran it with continue-on-error and printed nothing, so this is the first time anyone sees the output.",
+      "Reload the page. The list must show BOTH 'Flat share' and 'Goa trip' — this is AC-1 and AC-2, and it is the whole ticket. If 'Flat share' is gone, the fix is not in the PR.",
+      "Open 'Goa trip': Hotel ₹9,000 paid by Asha, Dinner ₹4,500 paid by Rahul, balances Asha +₹4,500, Rahul ₹0, Meera −₹4,500.",
+      "Run `npm run sdlc:seed:force`. Its stdout must say how many groups it deleted. Reload: only 'Goa trip' remains. This is AC-3.",
+      "Run `node bin/seed.js --help`: usage printed, marked --force DESTRUCTIVE, and the list on the page is unchanged afterwards.",
+      "Adversarial: `rm -f data/groups.json && npm run sdlc:seed`, then reload. Exactly one group, 'Goa trip', and exit code 0. This is AC-4/AC-5 — the fresh-container path, the one whose failure would look like a product bug.",
+      "Adversarial: run `npm run sdlc:seed` a second time without deleting anything, reload, and confirm there is still exactly one 'Goa trip' and the other groups are still there."
+    ],
+    "risks": [
+      "The QA workflow runs `npm run sdlc:seed` itself (sdlc-qa.yml:350-352) with `continue-on-error: true` and never reads its output. On a fresh container the store is empty, so the merge writes exactly {seed-goa} — byte-identical to today's behaviour — and QA fixtures are unaffected. The one new way QA could get no fixture is a pre-existing group named 'Goa trip' under a different id, which cannot happen in a fresh container because only the seed writes before the browser opens; and that path exits 0 rather than failing the step, which is the choice that keeps a hypothetical from costing the whole run.",
+      "`--force` is genuinely destructive and the fix is not a backup. It is reachable only by an explicit flag or the new `sdlc:seed:force` script, never by the default path, and both its usage text and its runtime output say so in the word DESTRUCTIVE.",
+      "Re-seeding replaces a previous `seed-goa` with a freshly generated one: the expense ids and createdAt are random/new on every run (src/domain.js assigns them), so the group is not byte-identical between runs. Nothing depends on those ids — test/domain.test.js:401 and test/server.test.js:630 assert on description, amount, payer and split, never on an id — and the previous seed-goa is a synthetic fixture, not user data.",
+      "The name-clash branch depends on group names being compared the way src/server.js compares them. Read that comparison before writing the branch and match it exactly; if server.js trims and lowercases, the seed must trim and lowercase, or the seed and the API disagree about what a duplicate is.",
+      "No forbidden path is touched: bin/seed.js, package.json, README.md and test/store.test.js are all outside .sdlc/**, .github/**, docs/spec/**, docs/prd.md, docs/trd.md, docs/ui.md and bin/sdlc. Nothing under .sdlc/ or .github/ is edited, so the QA workflow and the memory notes that describe the seed are left as they are — .sdlc/memory/project.md and .sdlc/memory/qa/environment.md still describe `sdlc:seed` accurately but do not mention the new `--force`, and the Librarian owns those files.",
+      "No new host is contacted, no dependency is added, and no network egress changes; env and url_allowlist are untouched."
+    ],
+    "out_of_scope": [
+      "What the fixture contains and whether it grows. The spec wants a richer seed (a few users, groups with every split type, payments, a placeholder member) — that is the Operations section of the spec and issue #21, and it would ship on its own if this ticket did not exist.",
+      "A general reset, restore, backup or admin command. If one is wanted it is its own ticket with its own rules; this change only makes the existing seed's wipe opt-in.",
+      "A migration or conversion of an existing store, and any recovery path for data already lost to the old unconditional reset. Nothing in the repository can reconstruct a deleted file.",
+      "Changing what the store, the server or the API do. src/store.js keeps reset() as it is — the reset is correct in an ephemeral container; its caller was the bug.",
+      "Touching .sdlc/** or .github/**, so the QA workflow's seed step and the memory notes stay as they are. A maintainer may later want the workflow to assert on the seed's exit code; that is a separate, framework-owned change."
+    ],
+    "alternatives_considered": [
+      {
+        "approach": "Refuse to run (exit non-zero) whenever the store is non-empty, and require --force to write at all.",
+        "rejected_because": "It is the safer-looking option and the wrong one here. The issue names the failure mode explicitly: a guard that refuses a fresh store costs QA its fixtures and every later failure reads as a product bug. A merge writes the fixture on every run, never loses data, and on an empty store produces exactly what the old code produced — so the QA path is unchanged by construction rather than by argument."
+      },
+      {
+        "approach": "Back up the store to a timestamped file before the wipe, so --force is reversible.",
+        "rejected_because": "It writes a second file into a repo whose deployment is one JSON file, and the backup would itself be untracked state nobody looks at. A restore path is a real feature with real rules, and the issue puts 'a general reset, restore or admin command' out of scope on its own. Naming the destructive path honestly is what this ticket asks for."
+      },
+      {
+        "approach": "Make the fixture write use a different, dedicated file that the server reads only when present, leaving the real store untouched by construction.",
+        "rejected_because": "It changes what the server loads, so it is a persistence change to the product rather than a fix to a script — and every write path in src/server.js would need to learn about the second file. Much larger diff, and the merge does the job in one function."
+      },
+      {
+        "approach": "Keep the unconditional reset but print a warning and require an interactive confirmation.",
+        "rejected_because": "`npm run sdlc:seed` in CI has no TTY and would block or auto-proceed; stdin prompts are exactly the kind of thing that silently becomes 'yes' in a pipeline. A flag is checkable by a test, which a prompt is not."
+      },
+      {
+        "approach": "Fix the script and leave the documentation surfaces alone, relying on the script's own output.",
+        "rejected_because": "The issue asks for the command's description to say what happens to existing data. The two places this repo documents commands are .sdlc/memory/project.md and docs/spec/**, and this pipeline may not edit either; a bare `npm run` listing and the README are what is left, and both are cheap."
+      }
+    ],
+    "assumptions": [
+      "npm surfaces a new script name in the output of a bare `npm run`, so `sdlc:seed:force` is visible before anyone runs it. If it is not, the README section and the script's own --help still carry the message, and the flag itself is discoverable in the file.",
+      "A group's name is unique across the store in practice, because POST /api/groups rejects a duplicate with GROUP_NAME_TAKEN. The clash branch is a guard against the seed manufacturing a state the API cannot produce; the merge is still correct if that API rule is ever relaxed."
+    ],
+    "unknowns": [
+      "Exactly how src/server.js normalises a name before its duplicate check (trim only, or trim plus case-fold, and whether it also folds internal whitespace). The implementer should read that comparison and match it; the plan assumes trim plus case-insensitive."
+    ],
+    "residual_risks": [
+      "Someone who genuinely wants a clean store still has to know about --force, and the default now preserves data they wanted gone — a behaviour change for anyone who relied on the old wipe. That is the point of the ticket, and the message, the npm script name and the README all say how to get the old behaviour deliberately.",
+      "The data already destroyed by earlier runs of the old seed is not recoverable by this change. Nothing in the repository ever held a second copy."
+    ],
+    "confidence": 88,
+    "confidence_rationale": "Every claim was read in the code and the data loss was reproduced on a scratch copy of the store. The change is confined to one script, one package.json line, one README section and one test file, and the existing test at test/domain.test.js:401 pins the fresh-run behaviour the fix has to preserve. What is not fully certain is the exact name-normalisation in src/server.js, which the work order tells the implementer to read and match rather than guess; that affects one guard branch, not the data-loss fix.",
+    "mode": "committed"
+  },
   "touch_paths": [],
   "acceptance": [],
   "planned_route": [
@@ -70,330 +231,12 @@
   },
   "stopped_at": null,
   "dispatched_stage": "plan",
-  "validated_work_order": {
-    "issue": 28,
-    "version": 1,
-    "kind": "bug",
-    "understanding": "bin/seed.js calls store.reset() unconditionally at line 9, before it builds anything. reset() (src/store.js:34-39) unlinks the store file, and the script then writes a store containing only the synthetic 'Goa trip' group. Because a Tabs installation is exactly one JSON file, running the documented `npm run sdlc:seed` on a checkout with real groups in it destroys the entire dataset with no prompt, no confirmation, no backup and no undo. In the QA container the store is ephemeral so the reset is right; the defect is that the unconditional reset is the ONLY behaviour the command has, so the command that .sdlc/memory/project.md and .sdlc/memory/qa/environment.md tell people to run is a data-loss command everywhere else. Reproduced: in a scratch dir with data/groups.json holding a group 'Flat share', `node bin/seed.js` left a file containing only 'seed-goa' and the message 'Seed written to data/groups.json'. The store module already resolves STORE_PATH when set and data/groups.json relative to cwd otherwise (src/store.js:4-8), so the write location the QA workflow depends on is already correct and needs a regression test, not a change; the change is the guard plus naming the destructive path.",
-    "root_cause": "bin/seed.js treated 'wipe the store' as a precondition of seeding rather than as an opt-in choice, and the flag that would have made it a choice did not exist. The store's own reset() is correct and stays; the caller is what is wrong.",
-    "reproduced": true,
-    "evidence": [
-      "Ran `node bin/seed.js` in an empty /tmp/seedcheck containing data/groups.json = {\"my-real-group\":{...}}. After the run the file contained only \"seed-goa\"; the pre-existing group was gone. Exit code 0, no warning printed.",
-      "The only stdout was `Seed written to data/groups.json`, which names the file it wrote and says nothing about the data it deleted.",
-      "package.json `sdlc:seed` is `node bin/seed.js` with no flag, no description, and no companion script — grep for 'seed' across the repo finds no other caller and no other guard.",
-      "test/domain.test.js:401 runs the real script via execFileSync against a fresh tmp STORE_PATH and asserts Object.keys(data) deepStrictEqual ['seed-goa']; it passes today and must keep passing, which is why this is a merge, not a refusal."
-    ],
-    "approach": "Turn the wipe into an opt-in `--force` and make the default path a merge. The default reads the existing store, adds (or replaces in place) the `seed-goa` group, and writes the union — so nothing is destroyed and QA's fresh-container behaviour is byte-for-byte what it is today, because an empty store merges to exactly {seed-goa}. `--force` calls store.reset() first so the store ends up holding the fixture alone, which is the reset QA's ephemeral container wants and the reason reset() exists. Three things make the choice readable before anyone runs it: the script prints a one-line statement of what it is about to do with existing data on every run, `--help` prints the full contract, and package.json gains a companion `sdlc:seed:force` script so the destructive path is visible in `npm run` output rather than being a flag buried in a comment. One guard the issue does not name but the store's own invariant requires: the API rejects a duplicate group name (GROUP_NAME_TAKEN, src/server.js), so a merge that added 'Goa trip' beside an existing group of that name would write a store the API could not have produced — the same class of defect the #7 review caught when the seed hand-built its group. In that one case the seed writes nothing, says exactly why, and exits 0. Exit 0 rather than non-zero is deliberate: the QA workflow runs `npm run sdlc:seed` with `continue-on-error: true` and never reads its output, so a non-zero exit would silently cost QA its fixtures and the next failure would read as a product bug. The clash is unreachable in a fresh container (only the seed writes before the browser opens), and when it does happen the store already holds a group called 'Goa trip'.",
-    "files": [
-      {
-        "path": "bin/seed.js",
-        "action": "edit",
-        "change": "Replace the unconditional `store.reset(); // Clear existing data` (line 9) with argument parsing and a merge/force branch. Import `path` is NOT needed — keep the existing target string `process.env.STORE_PATH || 'data/groups.json'` exactly as it is today, since src/store.js already resolves that the same way and the printed path is what an operator reads before trusting the command.\n\n1. Constants at the top, after the imports:\n   const SEED_ID = 'seed-goa';\n   const SEED_NAME = 'Goa trip';\n   const FORCE = '--force';\n\n2. USAGE — a template literal, printed verbatim by --help:\n   `Usage: node bin/seed.js [--force]\n\n   Writes the \"${SEED_NAME}\" demo fixture into the store.\n\n     (no options)  Existing groups are KEPT. The fixture is added alongside them, and an\n                   earlier fixture of the same id is replaced in place, so running this twice\n                   does not duplicate anything. If a DIFFERENT group is already named\n                   \"${SEED_NAME}\" nothing is written and this explains why.\n     --force       DESTRUCTIVE. Every existing group is deleted first, so the store ends up\n                   holding the fixture and nothing else. There is no backup and no undo.\n     -h, --help    Print this and exit 0 without touching the store.`\n\n3. Argument handling, before any store call:\n   const args = process.argv.slice(2);\n   if (args.includes('-h') || args.includes('--help')) { console.log(USAGE); process.exit(0); }\n   const unknown = args.filter((a) => a !== FORCE);\n   if (unknown.length > 0) {\n     console.error(`Unknown option: ${unknown.join(' ')}`);\n     console.error(USAGE);\n     process.exit(2);\n   }\n   const force = args.includes(FORCE);\n   const target = process.env.STORE_PATH || 'data/groups.json';\n\n4. Build the fixture exactly as today — keep the existing comment block about going through createGroup, the `{ ...createGroup({ name: SEED_NAME, members: ['Asha', 'Rahul', 'Meera'] }), id: SEED_ID }` construction, the two addExpense calls (Hotel 900000 paid by Asha, Dinner 450000 paid by Rahul, both split across all three), and the comment explaining that the id override is the only deviation from the live path. Nothing about the fixture's contents changes in this ticket.\n\n5. Replace the write, after the fixture is built, with:\n   const store = createStore();\n   if (force) {\n     const existing = store.load();\n     const removed = Object.keys(existing).length;\n     store.reset();\n     const data = {};\n     data[SEED_ID] = fixture;\n     store.save(data);\n     console.log(`Wrote \"${SEED_NAME}\" to ${target} — deleted ${removed} existing group(s) (--force).`);\n   } else {\n     console.log(`Seeding \"${SEED_NAME}\" into ${target} — existing groups are kept.`);\n     const existing = store.load();\n     const clash = Object.values(existing).find(\n       (g) => g && g.id !== SEED_ID && typeof g.name === 'string'\n         && g.name.trim().toLowerCase() === SEED_NAME.toLowerCase(),\n     );\n     if (clash) {\n       console.log(`Not seeded: a group named \"${SEED_NAME}\" already exists (id ${clash.id}).`);\n       console.log('Nothing was written and nothing was deleted. To delete it and write the fixture, re-run with --force.');\n       process.exit(0);\n     }\n     const data = { ...existing, [SEED_ID]: fixture };\n     store.save(data);\n     console.log(`Wrote \"${SEED_NAME}\" (${SEED_ID}) to ${target} — ${Object.keys(existing).length} existing group(s) left in place.`);\n   }\n   where `fixture` is the variable name for the g2 group object the script already builds. Name it that; do not leave the old `const data = {}; data[g2.id] = g2;` shape in the non-force branch, which is the overwrite this ticket exists to remove.\n\n6. The `console.log(`Seed written to ${...}`)` line at the end of the file is removed — its message is replaced by the lines above. Nothing else in the file changes: imports, the fixture construction and its comments stay as they are.",
-        "why": "The only code in the product that destroys a user's data, reachable by following the documentation. Everything else in this ticket is making the behaviour here readable."
-      },
-      {
-        "path": "package.json",
-        "action": "edit",
-        "change": "Add one line to `scripts`, directly after the existing `\"sdlc:seed\": \"node bin/seed.js\",`:\n  \"sdlc:seed:force\": \"node bin/seed.js --force\",\nNothing else in package.json changes. Keep the key `sdlc:seed` exactly as it is — the QA workflow greps for it (`.github/workflows/sdlc-qa.yml:350`, `scripts?.['sdlc:seed']`) and renames or removes it and QA provisions its own fixtures instead. The new script is what puts the destructive path, and the fact that it is destructive, into the output of a bare `npm run` — the place a person actually looks before running anything.",
-        "why": "'The command's description says what happens to existing data' has to live somewhere writable. .sdlc/memory/project.md is the repo's own home for command docs and is off-limits to this pipeline, and docs/spec/** may not be edited, so a named companion script is the honest way to make the destructive option visible."
-      },
-      {
-        "path": "README.md",
-        "action": "edit",
-        "change": "Add a `## Commands` section after the existing two lines, listing the four npm scripts and their effect, with the seed described in full:\n\n  ## Commands\n\n  | Command | What it does |\n  |---|---|\n  | `npm run sdlc:verify` | Runs the test suite (`node --test`). |\n  | `npm run sdlc:serve` | Serves the app on http://localhost:3000. |\n  | `npm run sdlc:seed` | Writes a demo group, \"Goa trip\", into the store. **Existing groups are kept** — the fixture is added alongside them. |\n  | `npm run sdlc:seed:force` | Same, but **deletes every existing group first**. Destructive, with no backup and no undo. |\n  | `npm run sdlc:ready` | Curl check that the server is answering. |\n\n  Then one paragraph under it:\n\n  The store is a single JSON file — `data/groups.json`, or `$STORE_PATH` when that is set — and it is the whole of a Tabs installation. `npm run sdlc:seed` never deletes anything; if you want the store to hold the demo group and nothing else, run `npm run sdlc:seed:force`, which unlinks the file first. `node bin/seed.js --help` prints the same contract from the script itself.",
-        "why": "A command's description is only useful where somebody reads it before running it, and this README is the only written surface a checkout's reader is guaranteed to open. The project brief and the QA environment notes already say the same things but are under .sdlc/, which no agent may edit."
-      }
-    ],
-    "tests": [
-      {
-        "path": "test/store.test.js",
-        "action": "edit",
-        "cases": [
-          "seeding over a store that already holds a group keeps that group and adds the fixture: write a group 'Flat share' with id 'flat-share' via the file store, execFileSync the real bin/seed.js with STORE_PATH pointed at it, then assert the resulting JSON has both keys 'flat-share' and 'seed-goa' and that data['flat-share'] deepStrictEquals the object written before the run",
-          "seeding into an empty store writes only the fixture: STORE_PATH at a fresh path that does not exist, assert the file exists and Object.keys() deepStrictEquals ['seed-goa'] — the fresh-run path QA depends on is never refused",
-          "--force deletes every existing group and leaves only the fixture: same setup as the first case, run with ['--force'], assert Object.keys() deepStrictEquals ['seed-goa'] and 'flat-share' is gone",
-          "the default run over a store that already holds the fixture replaces it in place and does not duplicate it: seed twice, assert the store still has exactly ['flat-share', 'seed-goa'] and the fixture still has the two seeded expenses in order",
-          "a pre-existing group named 'Goa trip' under a different id stops the seed writing a second one: write a group with id 'other-goa' and name 'Goa trip', run the seed, assert the process exits 0, Object.keys() deepStrictEquals ['other-goa'] (no 'seed-goa' added, nothing deleted), and stdout names the clash and the --force remedy",
-          "the seed writes to data/groups.json relative to the working directory when STORE_PATH is unset: execFileSync the script with cwd set to a fresh mkdtemp directory and STORE_PATH deleted from the child env, assert <tmpDir>/data/groups.json exists and holds 'seed-goa', and that nothing was written outside that temp directory",
-          "the seed's own output states what it does to existing data: capture stdout of a default run over a store holding one group and assert it contains the target path, the words 'existing groups are kept', and the number of groups left in place; capture the --force run and assert it says the groups were deleted and names --force",
-          "--help prints the usage and writes nothing: assert exit code 0, stdout contains '--force' and 'DESTRUCTIVE', and the store file is byte-identical to what it was before the run",
-          "an unrecognised option is refused with exit code 2 and writes nothing: run with ['--focre'] against a store holding one group, assert exit 2, stderr names the unknown option, and the store file is unchanged"
-        ]
-      }
-    ],
-    "acceptance": [
-      {
-        "id": "AC-1",
-        "check": "With a group already saved in the store, running the seed command leaves that group in place and adds the seeded 'Goa trip' group beside it — the group list on the home screen shows both after a reload, and neither one's balances changed.",
-        "verify": "browser"
-      },
-      {
-        "id": "AC-2",
-        "check": "The seeded 'Goa trip' group is not the only group in the store after a plain `npm run sdlc:seed` on a store that already had data: the pre-existing group is still listed, openable, and shows the same expenses and balances it did before the seed ran.",
-        "verify": "browser"
-      },
-      {
-        "id": "AC-3",
-        "check": "Deleting every group is opt-in and named: `npm run sdlc:seed:force` (or `node bin/seed.js --force`) is the only documented way to wipe, and after it the home screen lists 'Goa trip' and nothing else.",
-        "verify": "browser"
-      },
-      {
-        "id": "AC-4",
-        "check": "`npm run sdlc:seed` followed by `npm run sdlc:serve` on a clean checkout shows the seeded group: the home screen lists 'Goa trip', opening it shows Hotel ₹9,000 paid by Asha and Dinner ₹4,500 paid by Rahul, and its balances are Asha +₹4,500, Rahul ₹0, Meera −₹4,500.",
-        "verify": "browser"
-      },
-      {
-        "id": "AC-5",
-        "check": "Seeding into a store that holds nothing still writes the fixture and does not fail or exit non-zero — a fresh QA run is never refused its fixtures.",
-        "verify": "test",
-        "how_to_verify": "test/store.test.js case 'seeding into an empty store writes only the fixture' (CI runs `npm run sdlc:verify`). Also confirmed in the browser by AC-4, which is the same path on a clean checkout."
-      },
-      {
-        "id": "AC-6",
-        "check": "The seed command's own output says what it does to existing data, both ways: a default run says existing groups are kept, a --force run says how many it deleted, and both name the store file they wrote.",
-        "verify": "test",
-        "how_to_verify": "test/store.test.js case \"the seed's own output states what it does to existing data\" — stdout is captured from a real run of the script over a store holding one group, once without the flag and once with it."
-      },
-      {
-        "id": "AC-7",
-        "check": "The fixture lands where the QA workflow reads it: with STORE_PATH set it is written to that path, and with STORE_PATH unset it is written to data/groups.json relative to the working directory.",
-        "verify": "test",
-        "how_to_verify": "test/store.test.js case 'the seed writes to data/groups.json relative to the working directory when STORE_PATH is unset' (the STORE_PATH-set half is already covered by the case that seeds into a fresh path). AC-4 is the same behaviour observed through the running app."
-      },
-      {
-        "id": "AC-8",
-        "check": "Running the seed twice over the same store leaves exactly one seeded group, and a group that already exists under a different id is never replaced or duplicated by name.",
-        "verify": "test",
-        "how_to_verify": "test/store.test.js cases 'the default run over a store that already holds the fixture replaces it in place and does not duplicate it' and \"a pre-existing group named 'Goa trip' under a different id stops the seed writing a second one\"."
-      }
-    ],
-    "qa_script": [
-      "npm run sdlc:verify — expect green, including the new bin/seed.js cases in test/store.test.js.",
-      "Confirm the diff touches only bin/seed.js, package.json, README.md and test/store.test.js: `git diff --stat main...HEAD`. Nothing under .sdlc/ or .github/ may appear.",
-      "The app is already booted by the workflow and the workflow has already run `npm run sdlc:seed`. Open http://localhost:3000 and note the group list.",
-      "Create a group through the UI: name 'Flat share', members Alice and Bob, one expense. Confirm it is listed.",
-      "By hand, in the same working directory the app runs in, run `npm run sdlc:seed` and read its stdout: it must name the store file and say existing groups are kept. The workflow ran it with continue-on-error and printed nothing, so this is the first time anyone sees the output.",
-      "Reload the page. The list must show BOTH 'Flat share' and 'Goa trip' — this is AC-1 and AC-2, and it is the whole ticket. If 'Flat share' is gone, the fix is not in the PR.",
-      "Open 'Goa trip': Hotel ₹9,000 paid by Asha, Dinner ₹4,500 paid by Rahul, balances Asha +₹4,500, Rahul ₹0, Meera −₹4,500.",
-      "Run `npm run sdlc:seed:force`. Its stdout must say how many groups it deleted. Reload: only 'Goa trip' remains. This is AC-3.",
-      "Run `node bin/seed.js --help`: usage printed, marked --force DESTRUCTIVE, and the list on the page is unchanged afterwards.",
-      "Adversarial: `rm -f data/groups.json && npm run sdlc:seed`, then reload. Exactly one group, 'Goa trip', and exit code 0. This is AC-4/AC-5 — the fresh-container path, the one whose failure would look like a product bug.",
-      "Adversarial: run `npm run sdlc:seed` a second time without deleting anything, reload, and confirm there is still exactly one 'Goa trip' and the other groups are still there."
-    ],
-    "risks": [
-      "The QA workflow runs `npm run sdlc:seed` itself (sdlc-qa.yml:350-352) with `continue-on-error: true` and never reads its output. On a fresh container the store is empty, so the merge writes exactly {seed-goa} — byte-identical to today's behaviour — and QA fixtures are unaffected. The one new way QA could get no fixture is a pre-existing group named 'Goa trip' under a different id, which cannot happen in a fresh container because only the seed writes before the browser opens; and that path exits 0 rather than failing the step, which is the choice that keeps a hypothetical from costing the whole run.",
-      "`--force` is genuinely destructive and the fix is not a backup. It is reachable only by an explicit flag or the new `sdlc:seed:force` script, never by the default path, and both its usage text and its runtime output say so in the word DESTRUCTIVE.",
-      "Re-seeding replaces a previous `seed-goa` with a freshly generated one: the expense ids and createdAt are random/new on every run (src/domain.js assigns them), so the group is not byte-identical between runs. Nothing depends on those ids — test/domain.test.js:401 and test/server.test.js:630 assert on description, amount, payer and split, never on an id — and the previous seed-goa is a synthetic fixture, not user data.",
-      "The name-clash branch depends on group names being compared the way src/server.js compares them. Read that comparison before writing the branch and match it exactly; if server.js trims and lowercases, the seed must trim and lowercase, or the seed and the API disagree about what a duplicate is.",
-      "No forbidden path is touched: bin/seed.js, package.json, README.md and test/store.test.js are all outside .sdlc/**, .github/**, docs/spec/**, docs/prd.md, docs/trd.md, docs/ui.md and bin/sdlc. Nothing under .sdlc/ or .github/ is edited, so the QA workflow and the memory notes that describe the seed are left as they are — .sdlc/memory/project.md and .sdlc/memory/qa/environment.md still describe `sdlc:seed` accurately but do not mention the new `--force`, and the Librarian owns those files.",
-      "No new host is contacted, no dependency is added, and no network egress changes; env and url_allowlist are untouched."
-    ],
-    "out_of_scope": [
-      "What the fixture contains and whether it grows. The spec wants a richer seed (a few users, groups with every split type, payments, a placeholder member) — that is the Operations section of the spec and issue #21, and it would ship on its own if this ticket did not exist.",
-      "A general reset, restore, backup or admin command. If one is wanted it is its own ticket with its own rules; this change only makes the existing seed's wipe opt-in.",
-      "A migration or conversion of an existing store, and any recovery path for data already lost to the old unconditional reset. Nothing in the repository can reconstruct a deleted file.",
-      "Changing what the store, the server or the API do. src/store.js keeps reset() as it is — the reset is correct in an ephemeral container; its caller was the bug.",
-      "Touching .sdlc/** or .github/**, so the QA workflow's seed step and the memory notes stay as they are. A maintainer may later want the workflow to assert on the seed's exit code; that is a separate, framework-owned change."
-    ],
-    "alternatives_considered": [
-      {
-        "approach": "Refuse to run (exit non-zero) whenever the store is non-empty, and require --force to write at all.",
-        "rejected_because": "It is the safer-looking option and the wrong one here. The issue names the failure mode explicitly: a guard that refuses a fresh store costs QA its fixtures and every later failure reads as a product bug. A merge writes the fixture on every run, never loses data, and on an empty store produces exactly what the old code produced — so the QA path is unchanged by construction rather than by argument."
-      },
-      {
-        "approach": "Back up the store to a timestamped file before the wipe, so --force is reversible.",
-        "rejected_because": "It writes a second file into a repo whose deployment is one JSON file, and the backup would itself be untracked state nobody looks at. A restore path is a real feature with real rules, and the issue puts 'a general reset, restore or admin command' out of scope on its own. Naming the destructive path honestly is what this ticket asks for."
-      },
-      {
-        "approach": "Make the fixture write use a different, dedicated file that the server reads only when present, leaving the real store untouched by construction.",
-        "rejected_because": "It changes what the server loads, so it is a persistence change to the product rather than a fix to a script — and every write path in src/server.js would need to learn about the second file. Much larger diff, and the merge does the job in one function."
-      },
-      {
-        "approach": "Keep the unconditional reset but print a warning and require an interactive confirmation.",
-        "rejected_because": "`npm run sdlc:seed` in CI has no TTY and would block or auto-proceed; stdin prompts are exactly the kind of thing that silently becomes 'yes' in a pipeline. A flag is checkable by a test, which a prompt is not."
-      },
-      {
-        "approach": "Fix the script and leave the documentation surfaces alone, relying on the script's own output.",
-        "rejected_because": "The issue asks for the command's description to say what happens to existing data. The two places this repo documents commands are .sdlc/memory/project.md and docs/spec/**, and this pipeline may not edit either; a bare `npm run` listing and the README are what is left, and both are cheap."
-      }
-    ],
-    "assumptions": [
-      "npm surfaces a new script name in the output of a bare `npm run`, so `sdlc:seed:force` is visible before anyone runs it. If it is not, the README section and the script's own --help still carry the message, and the flag itself is discoverable in the file.",
-      "A group's name is unique across the store in practice, because POST /api/groups rejects a duplicate with GROUP_NAME_TAKEN. The clash branch is a guard against the seed manufacturing a state the API cannot produce; the merge is still correct if that API rule is ever relaxed."
-    ],
-    "unknowns": [
-      "Exactly how src/server.js normalises a name before its duplicate check (trim only, or trim plus case-fold, and whether it also folds internal whitespace). The implementer should read that comparison and match it; the plan assumes trim plus case-insensitive."
-    ],
-    "residual_risks": [
-      "Someone who genuinely wants a clean store still has to know about --force, and the default now preserves data they wanted gone — a behaviour change for anyone who relied on the old wipe. That is the point of the ticket, and the message, the npm script name and the README all say how to get the old behaviour deliberately.",
-      "The data already destroyed by earlier runs of the old seed is not recoverable by this change. Nothing in the repository ever held a second copy."
-    ],
-    "confidence": 88,
-    "confidence_rationale": "Every claim was read in the code and the data loss was reproduced on a scratch copy of the store. The change is confined to one script, one package.json line, one README section and one test file, and the existing test at test/domain.test.js:401 pins the fresh-run behaviour the fix has to preserve. What is not fully certain is the exact name-normalisation in src/server.js, which the work order tells the implementer to read and match rather than guess; that affects one guard branch, not the data-loss fix."
-  },
   "validated_from": "plan",
   "validated_at": "2026-09-26T19:59:41.486Z",
   "validated_ac_changes": [],
-  "approved_work_order": {
-    "issue": 28,
-    "version": 1,
-    "kind": "bug",
-    "understanding": "bin/seed.js calls store.reset() unconditionally at line 9, before it builds anything. reset() (src/store.js:34-39) unlinks the store file, and the script then writes a store containing only the synthetic 'Goa trip' group. Because a Tabs installation is exactly one JSON file, running the documented `npm run sdlc:seed` on a checkout with real groups in it destroys the entire dataset with no prompt, no confirmation, no backup and no undo. In the QA container the store is ephemeral so the reset is right; the defect is that the unconditional reset is the ONLY behaviour the command has, so the command that .sdlc/memory/project.md and .sdlc/memory/qa/environment.md tell people to run is a data-loss command everywhere else. Reproduced: in a scratch dir with data/groups.json holding a group 'Flat share', `node bin/seed.js` left a file containing only 'seed-goa' and the message 'Seed written to data/groups.json'. The store module already resolves STORE_PATH when set and data/groups.json relative to cwd otherwise (src/store.js:4-8), so the write location the QA workflow depends on is already correct and needs a regression test, not a change; the change is the guard plus naming the destructive path.",
-    "root_cause": "bin/seed.js treated 'wipe the store' as a precondition of seeding rather than as an opt-in choice, and the flag that would have made it a choice did not exist. The store's own reset() is correct and stays; the caller is what is wrong.",
-    "reproduced": true,
-    "evidence": [
-      "Ran `node bin/seed.js` in an empty /tmp/seedcheck containing data/groups.json = {\"my-real-group\":{...}}. After the run the file contained only \"seed-goa\"; the pre-existing group was gone. Exit code 0, no warning printed.",
-      "The only stdout was `Seed written to data/groups.json`, which names the file it wrote and says nothing about the data it deleted.",
-      "package.json `sdlc:seed` is `node bin/seed.js` with no flag, no description, and no companion script — grep for 'seed' across the repo finds no other caller and no other guard.",
-      "test/domain.test.js:401 runs the real script via execFileSync against a fresh tmp STORE_PATH and asserts Object.keys(data) deepStrictEqual ['seed-goa']; it passes today and must keep passing, which is why this is a merge, not a refusal."
-    ],
-    "approach": "Turn the wipe into an opt-in `--force` and make the default path a merge. The default reads the existing store, adds (or replaces in place) the `seed-goa` group, and writes the union — so nothing is destroyed and QA's fresh-container behaviour is byte-for-byte what it is today, because an empty store merges to exactly {seed-goa}. `--force` calls store.reset() first so the store ends up holding the fixture alone, which is the reset QA's ephemeral container wants and the reason reset() exists. Three things make the choice readable before anyone runs it: the script prints a one-line statement of what it is about to do with existing data on every run, `--help` prints the full contract, and package.json gains a companion `sdlc:seed:force` script so the destructive path is visible in `npm run` output rather than being a flag buried in a comment. One guard the issue does not name but the store's own invariant requires: the API rejects a duplicate group name (GROUP_NAME_TAKEN, src/server.js), so a merge that added 'Goa trip' beside an existing group of that name would write a store the API could not have produced — the same class of defect the #7 review caught when the seed hand-built its group. In that one case the seed writes nothing, says exactly why, and exits 0. Exit 0 rather than non-zero is deliberate: the QA workflow runs `npm run sdlc:seed` with `continue-on-error: true` and never reads its output, so a non-zero exit would silently cost QA its fixtures and the next failure would read as a product bug. The clash is unreachable in a fresh container (only the seed writes before the browser opens), and when it does happen the store already holds a group called 'Goa trip'.",
-    "files": [
-      {
-        "path": "bin/seed.js",
-        "action": "edit",
-        "change": "Replace the unconditional `store.reset(); // Clear existing data` (line 9) with argument parsing and a merge/force branch. Import `path` is NOT needed — keep the existing target string `process.env.STORE_PATH || 'data/groups.json'` exactly as it is today, since src/store.js already resolves that the same way and the printed path is what an operator reads before trusting the command.\n\n1. Constants at the top, after the imports:\n   const SEED_ID = 'seed-goa';\n   const SEED_NAME = 'Goa trip';\n   const FORCE = '--force';\n\n2. USAGE — a template literal, printed verbatim by --help:\n   `Usage: node bin/seed.js [--force]\n\n   Writes the \"${SEED_NAME}\" demo fixture into the store.\n\n     (no options)  Existing groups are KEPT. The fixture is added alongside them, and an\n                   earlier fixture of the same id is replaced in place, so running this twice\n                   does not duplicate anything. If a DIFFERENT group is already named\n                   \"${SEED_NAME}\" nothing is written and this explains why.\n     --force       DESTRUCTIVE. Every existing group is deleted first, so the store ends up\n                   holding the fixture and nothing else. There is no backup and no undo.\n     -h, --help    Print this and exit 0 without touching the store.`\n\n3. Argument handling, before any store call:\n   const args = process.argv.slice(2);\n   if (args.includes('-h') || args.includes('--help')) { console.log(USAGE); process.exit(0); }\n   const unknown = args.filter((a) => a !== FORCE);\n   if (unknown.length > 0) {\n     console.error(`Unknown option: ${unknown.join(' ')}`);\n     console.error(USAGE);\n     process.exit(2);\n   }\n   const force = args.includes(FORCE);\n   const target = process.env.STORE_PATH || 'data/groups.json';\n\n4. Build the fixture exactly as today — keep the existing comment block about going through createGroup, the `{ ...createGroup({ name: SEED_NAME, members: ['Asha', 'Rahul', 'Meera'] }), id: SEED_ID }` construction, the two addExpense calls (Hotel 900000 paid by Asha, Dinner 450000 paid by Rahul, both split across all three), and the comment explaining that the id override is the only deviation from the live path. Nothing about the fixture's contents changes in this ticket.\n\n5. Replace the write, after the fixture is built, with:\n   const store = createStore();\n   if (force) {\n     const existing = store.load();\n     const removed = Object.keys(existing).length;\n     store.reset();\n     const data = {};\n     data[SEED_ID] = fixture;\n     store.save(data);\n     console.log(`Wrote \"${SEED_NAME}\" to ${target} — deleted ${removed} existing group(s) (--force).`);\n   } else {\n     console.log(`Seeding \"${SEED_NAME}\" into ${target} — existing groups are kept.`);\n     const existing = store.load();\n     const clash = Object.values(existing).find(\n       (g) => g && g.id !== SEED_ID && typeof g.name === 'string'\n         && g.name.trim().toLowerCase() === SEED_NAME.toLowerCase(),\n     );\n     if (clash) {\n       console.log(`Not seeded: a group named \"${SEED_NAME}\" already exists (id ${clash.id}).`);\n       console.log('Nothing was written and nothing was deleted. To delete it and write the fixture, re-run with --force.');\n       process.exit(0);\n     }\n     const data = { ...existing, [SEED_ID]: fixture };\n     store.save(data);\n     console.log(`Wrote \"${SEED_NAME}\" (${SEED_ID}) to ${target} — ${Object.keys(existing).length} existing group(s) left in place.`);\n   }\n   where `fixture` is the variable name for the g2 group object the script already builds. Name it that; do not leave the old `const data = {}; data[g2.id] = g2;` shape in the non-force branch, which is the overwrite this ticket exists to remove.\n\n6. The `console.log(`Seed written to ${...}`)` line at the end of the file is removed — its message is replaced by the lines above. Nothing else in the file changes: imports, the fixture construction and its comments stay as they are.",
-        "why": "The only code in the product that destroys a user's data, reachable by following the documentation. Everything else in this ticket is making the behaviour here readable."
-      },
-      {
-        "path": "package.json",
-        "action": "edit",
-        "change": "Add one line to `scripts`, directly after the existing `\"sdlc:seed\": \"node bin/seed.js\",`:\n  \"sdlc:seed:force\": \"node bin/seed.js --force\",\nNothing else in package.json changes. Keep the key `sdlc:seed` exactly as it is — the QA workflow greps for it (`.github/workflows/sdlc-qa.yml:350`, `scripts?.['sdlc:seed']`) and renames or removes it and QA provisions its own fixtures instead. The new script is what puts the destructive path, and the fact that it is destructive, into the output of a bare `npm run` — the place a person actually looks before running anything.",
-        "why": "'The command's description says what happens to existing data' has to live somewhere writable. .sdlc/memory/project.md is the repo's own home for command docs and is off-limits to this pipeline, and docs/spec/** may not be edited, so a named companion script is the honest way to make the destructive option visible."
-      },
-      {
-        "path": "README.md",
-        "action": "edit",
-        "change": "Add a `## Commands` section after the existing two lines, listing the four npm scripts and their effect, with the seed described in full:\n\n  ## Commands\n\n  | Command | What it does |\n  |---|---|\n  | `npm run sdlc:verify` | Runs the test suite (`node --test`). |\n  | `npm run sdlc:serve` | Serves the app on http://localhost:3000. |\n  | `npm run sdlc:seed` | Writes a demo group, \"Goa trip\", into the store. **Existing groups are kept** — the fixture is added alongside them. |\n  | `npm run sdlc:seed:force` | Same, but **deletes every existing group first**. Destructive, with no backup and no undo. |\n  | `npm run sdlc:ready` | Curl check that the server is answering. |\n\n  Then one paragraph under it:\n\n  The store is a single JSON file — `data/groups.json`, or `$STORE_PATH` when that is set — and it is the whole of a Tabs installation. `npm run sdlc:seed` never deletes anything; if you want the store to hold the demo group and nothing else, run `npm run sdlc:seed:force`, which unlinks the file first. `node bin/seed.js --help` prints the same contract from the script itself.",
-        "why": "A command's description is only useful where somebody reads it before running it, and this README is the only written surface a checkout's reader is guaranteed to open. The project brief and the QA environment notes already say the same things but are under .sdlc/, which no agent may edit."
-      }
-    ],
-    "tests": [
-      {
-        "path": "test/store.test.js",
-        "action": "edit",
-        "cases": [
-          "seeding over a store that already holds a group keeps that group and adds the fixture: write a group 'Flat share' with id 'flat-share' via the file store, execFileSync the real bin/seed.js with STORE_PATH pointed at it, then assert the resulting JSON has both keys 'flat-share' and 'seed-goa' and that data['flat-share'] deepStrictEquals the object written before the run",
-          "seeding into an empty store writes only the fixture: STORE_PATH at a fresh path that does not exist, assert the file exists and Object.keys() deepStrictEquals ['seed-goa'] — the fresh-run path QA depends on is never refused",
-          "--force deletes every existing group and leaves only the fixture: same setup as the first case, run with ['--force'], assert Object.keys() deepStrictEquals ['seed-goa'] and 'flat-share' is gone",
-          "the default run over a store that already holds the fixture replaces it in place and does not duplicate it: seed twice, assert the store still has exactly ['flat-share', 'seed-goa'] and the fixture still has the two seeded expenses in order",
-          "a pre-existing group named 'Goa trip' under a different id stops the seed writing a second one: write a group with id 'other-goa' and name 'Goa trip', run the seed, assert the process exits 0, Object.keys() deepStrictEquals ['other-goa'] (no 'seed-goa' added, nothing deleted), and stdout names the clash and the --force remedy",
-          "the seed writes to data/groups.json relative to the working directory when STORE_PATH is unset: execFileSync the script with cwd set to a fresh mkdtemp directory and STORE_PATH deleted from the child env, assert <tmpDir>/data/groups.json exists and holds 'seed-goa', and that nothing was written outside that temp directory",
-          "the seed's own output states what it does to existing data: capture stdout of a default run over a store holding one group and assert it contains the target path, the words 'existing groups are kept', and the number of groups left in place; capture the --force run and assert it says the groups were deleted and names --force",
-          "--help prints the usage and writes nothing: assert exit code 0, stdout contains '--force' and 'DESTRUCTIVE', and the store file is byte-identical to what it was before the run",
-          "an unrecognised option is refused with exit code 2 and writes nothing: run with ['--focre'] against a store holding one group, assert exit 2, stderr names the unknown option, and the store file is unchanged"
-        ]
-      }
-    ],
-    "acceptance": [
-      {
-        "id": "AC-1",
-        "check": "With a group already saved in the store, running the seed command leaves that group in place and adds the seeded 'Goa trip' group beside it — the group list on the home screen shows both after a reload, and neither one's balances changed.",
-        "verify": "browser"
-      },
-      {
-        "id": "AC-2",
-        "check": "The seeded 'Goa trip' group is not the only group in the store after a plain `npm run sdlc:seed` on a store that already had data: the pre-existing group is still listed, openable, and shows the same expenses and balances it did before the seed ran.",
-        "verify": "browser"
-      },
-      {
-        "id": "AC-3",
-        "check": "Deleting every group is opt-in and named: `npm run sdlc:seed:force` (or `node bin/seed.js --force`) is the only documented way to wipe, and after it the home screen lists 'Goa trip' and nothing else.",
-        "verify": "browser"
-      },
-      {
-        "id": "AC-4",
-        "check": "`npm run sdlc:seed` followed by `npm run sdlc:serve` on a clean checkout shows the seeded group: the home screen lists 'Goa trip', opening it shows Hotel ₹9,000 paid by Asha and Dinner ₹4,500 paid by Rahul, and its balances are Asha +₹4,500, Rahul ₹0, Meera −₹4,500.",
-        "verify": "browser"
-      },
-      {
-        "id": "AC-5",
-        "check": "Seeding into a store that holds nothing still writes the fixture and does not fail or exit non-zero — a fresh QA run is never refused its fixtures.",
-        "verify": "test",
-        "how_to_verify": "test/store.test.js case 'seeding into an empty store writes only the fixture' (CI runs `npm run sdlc:verify`). Also confirmed in the browser by AC-4, which is the same path on a clean checkout."
-      },
-      {
-        "id": "AC-6",
-        "check": "The seed command's own output says what it does to existing data, both ways: a default run says existing groups are kept, a --force run says how many it deleted, and both name the store file they wrote.",
-        "verify": "test",
-        "how_to_verify": "test/store.test.js case \"the seed's own output states what it does to existing data\" — stdout is captured from a real run of the script over a store holding one group, once without the flag and once with it."
-      },
-      {
-        "id": "AC-7",
-        "check": "The fixture lands where the QA workflow reads it: with STORE_PATH set it is written to that path, and with STORE_PATH unset it is written to data/groups.json relative to the working directory.",
-        "verify": "test",
-        "how_to_verify": "test/store.test.js case 'the seed writes to data/groups.json relative to the working directory when STORE_PATH is unset' (the STORE_PATH-set half is already covered by the case that seeds into a fresh path). AC-4 is the same behaviour observed through the running app."
-      },
-      {
-        "id": "AC-8",
-        "check": "Running the seed twice over the same store leaves exactly one seeded group, and a group that already exists under a different id is never replaced or duplicated by name.",
-        "verify": "test",
-        "how_to_verify": "test/store.test.js cases 'the default run over a store that already holds the fixture replaces it in place and does not duplicate it' and \"a pre-existing group named 'Goa trip' under a different id stops the seed writing a second one\"."
-      }
-    ],
-    "qa_script": [
-      "npm run sdlc:verify — expect green, including the new bin/seed.js cases in test/store.test.js.",
-      "Confirm the diff touches only bin/seed.js, package.json, README.md and test/store.test.js: `git diff --stat main...HEAD`. Nothing under .sdlc/ or .github/ may appear.",
-      "The app is already booted by the workflow and the workflow has already run `npm run sdlc:seed`. Open http://localhost:3000 and note the group list.",
-      "Create a group through the UI: name 'Flat share', members Alice and Bob, one expense. Confirm it is listed.",
-      "By hand, in the same working directory the app runs in, run `npm run sdlc:seed` and read its stdout: it must name the store file and say existing groups are kept. The workflow ran it with continue-on-error and printed nothing, so this is the first time anyone sees the output.",
-      "Reload the page. The list must show BOTH 'Flat share' and 'Goa trip' — this is AC-1 and AC-2, and it is the whole ticket. If 'Flat share' is gone, the fix is not in the PR.",
-      "Open 'Goa trip': Hotel ₹9,000 paid by Asha, Dinner ₹4,500 paid by Rahul, balances Asha +₹4,500, Rahul ₹0, Meera −₹4,500.",
-      "Run `npm run sdlc:seed:force`. Its stdout must say how many groups it deleted. Reload: only 'Goa trip' remains. This is AC-3.",
-      "Run `node bin/seed.js --help`: usage printed, marked --force DESTRUCTIVE, and the list on the page is unchanged afterwards.",
-      "Adversarial: `rm -f data/groups.json && npm run sdlc:seed`, then reload. Exactly one group, 'Goa trip', and exit code 0. This is AC-4/AC-5 — the fresh-container path, the one whose failure would look like a product bug.",
-      "Adversarial: run `npm run sdlc:seed` a second time without deleting anything, reload, and confirm there is still exactly one 'Goa trip' and the other groups are still there."
-    ],
-    "risks": [
-      "The QA workflow runs `npm run sdlc:seed` itself (sdlc-qa.yml:350-352) with `continue-on-error: true` and never reads its output. On a fresh container the store is empty, so the merge writes exactly {seed-goa} — byte-identical to today's behaviour — and QA fixtures are unaffected. The one new way QA could get no fixture is a pre-existing group named 'Goa trip' under a different id, which cannot happen in a fresh container because only the seed writes before the browser opens; and that path exits 0 rather than failing the step, which is the choice that keeps a hypothetical from costing the whole run.",
-      "`--force` is genuinely destructive and the fix is not a backup. It is reachable only by an explicit flag or the new `sdlc:seed:force` script, never by the default path, and both its usage text and its runtime output say so in the word DESTRUCTIVE.",
-      "Re-seeding replaces a previous `seed-goa` with a freshly generated one: the expense ids and createdAt are random/new on every run (src/domain.js assigns them), so the group is not byte-identical between runs. Nothing depends on those ids — test/domain.test.js:401 and test/server.test.js:630 assert on description, amount, payer and split, never on an id — and the previous seed-goa is a synthetic fixture, not user data.",
-      "The name-clash branch depends on group names being compared the way src/server.js compares them. Read that comparison before writing the branch and match it exactly; if server.js trims and lowercases, the seed must trim and lowercase, or the seed and the API disagree about what a duplicate is.",
-      "No forbidden path is touched: bin/seed.js, package.json, README.md and test/store.test.js are all outside .sdlc/**, .github/**, docs/spec/**, docs/prd.md, docs/trd.md, docs/ui.md and bin/sdlc. Nothing under .sdlc/ or .github/ is edited, so the QA workflow and the memory notes that describe the seed are left as they are — .sdlc/memory/project.md and .sdlc/memory/qa/environment.md still describe `sdlc:seed` accurately but do not mention the new `--force`, and the Librarian owns those files.",
-      "No new host is contacted, no dependency is added, and no network egress changes; env and url_allowlist are untouched."
-    ],
-    "out_of_scope": [
-      "What the fixture contains and whether it grows. The spec wants a richer seed (a few users, groups with every split type, payments, a placeholder member) — that is the Operations section of the spec and issue #21, and it would ship on its own if this ticket did not exist.",
-      "A general reset, restore, backup or admin command. If one is wanted it is its own ticket with its own rules; this change only makes the existing seed's wipe opt-in.",
-      "A migration or conversion of an existing store, and any recovery path for data already lost to the old unconditional reset. Nothing in the repository can reconstruct a deleted file.",
-      "Changing what the store, the server or the API do. src/store.js keeps reset() as it is — the reset is correct in an ephemeral container; its caller was the bug.",
-      "Touching .sdlc/** or .github/**, so the QA workflow's seed step and the memory notes stay as they are. A maintainer may later want the workflow to assert on the seed's exit code; that is a separate, framework-owned change."
-    ],
-    "alternatives_considered": [
-      {
-        "approach": "Refuse to run (exit non-zero) whenever the store is non-empty, and require --force to write at all.",
-        "rejected_because": "It is the safer-looking option and the wrong one here. The issue names the failure mode explicitly: a guard that refuses a fresh store costs QA its fixtures and every later failure reads as a product bug. A merge writes the fixture on every run, never loses data, and on an empty store produces exactly what the old code produced — so the QA path is unchanged by construction rather than by argument."
-      },
-      {
-        "approach": "Back up the store to a timestamped file before the wipe, so --force is reversible.",
-        "rejected_because": "It writes a second file into a repo whose deployment is one JSON file, and the backup would itself be untracked state nobody looks at. A restore path is a real feature with real rules, and the issue puts 'a general reset, restore or admin command' out of scope on its own. Naming the destructive path honestly is what this ticket asks for."
-      },
-      {
-        "approach": "Make the fixture write use a different, dedicated file that the server reads only when present, leaving the real store untouched by construction.",
-        "rejected_because": "It changes what the server loads, so it is a persistence change to the product rather than a fix to a script — and every write path in src/server.js would need to learn about the second file. Much larger diff, and the merge does the job in one function."
-      },
-      {
-        "approach": "Keep the unconditional reset but print a warning and require an interactive confirmation.",
-        "rejected_because": "`npm run sdlc:seed` in CI has no TTY and would block or auto-proceed; stdin prompts are exactly the kind of thing that silently becomes 'yes' in a pipeline. A flag is checkable by a test, which a prompt is not."
-      },
-      {
-        "approach": "Fix the script and leave the documentation surfaces alone, relying on the script's own output.",
-        "rejected_because": "The issue asks for the command's description to say what happens to existing data. The two places this repo documents commands are .sdlc/memory/project.md and docs/spec/**, and this pipeline may not edit either; a bare `npm run` listing and the README are what is left, and both are cheap."
-      }
-    ],
-    "assumptions": [
-      "npm surfaces a new script name in the output of a bare `npm run`, so `sdlc:seed:force` is visible before anyone runs it. If it is not, the README section and the script's own --help still carry the message, and the flag itself is discoverable in the file.",
-      "A group's name is unique across the store in practice, because POST /api/groups rejects a duplicate with GROUP_NAME_TAKEN. The clash branch is a guard against the seed manufacturing a state the API cannot produce; the merge is still correct if that API rule is ever relaxed."
-    ],
-    "unknowns": [
-      "Exactly how src/server.js normalises a name before its duplicate check (trim only, or trim plus case-fold, and whether it also folds internal whitespace). The implementer should read that comparison and match it; the plan assumes trim plus case-insensitive."
-    ],
-    "residual_risks": [
-      "Someone who genuinely wants a clean store still has to know about --force, and the default now preserves data they wanted gone — a behaviour change for anyone who relied on the old wipe. That is the point of the ticket, and the message, the npm script name and the README all say how to get the old behaviour deliberately.",
-      "The data already destroyed by earlier runs of the old seed is not recoverable by this change. Nothing in the repository ever held a second copy."
-    ],
-    "confidence": 88,
-    "confidence_rationale": "Every claim was read in the code and the data loss was reproduced on a scratch copy of the store. The change is confined to one script, one package.json line, one README section and one test file, and the existing test at test/domain.test.js:401 pins the fresh-run behaviour the fix has to preserve. What is not fully certain is the exact name-normalisation in src/server.js, which the work order tells the implementer to read and match rather than guess; that affects one guard branch, not the data-loss fix."
-  },
-  "approved_too_high": false
+  "approved_too_high": false,
+  "work_order_version": 1,
+  "work_order_posted_at": "2026-09-26T20:05:42.500Z",
+  "work_order_from": "plan",
+  "work_order_comment": "5849453293"
 }
