@@ -156,7 +156,9 @@
       "Whether 0.0.1's entry belongs under Added or Fixed is a reading of the record, not a fact in it. The plan files it under Added and says so; if the maintainer disagrees it is a one-line move that changes neither the entry count nor any other criterion."
     ]
   },
-  "touch_paths": [],
+  "touch_paths": [
+    "CHANGELOG.md"
+  ],
   "acceptance": [],
   "planned_route": [
     "plan",
