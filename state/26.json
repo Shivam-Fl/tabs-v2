@@ -229,7 +229,10 @@
     "debate_summary": "v1 was rejected on two points, both about a criterion that could not be satisfied rather than about the code. Objection 1: AC-3 and qa_script step 4 required a single Tab after opening a group to land on the back control, while the plan's own focus step puts focus on the tabindex=\"-1\" heading at public/index.html:75, which sits between the back control (:74) and #expense-desc (:79) — so Tab moves forward past the heading and AC-3 was unsatisfiable. Resolved by deriving the criterion from the markup rather than moving the markup: the back control stays at :74, AC-3 now checks the direction the order actually produces (from #expense-desc, Shift+Tab lands on the back control, and Enter or Space on it returns to the list), it names where focus is when the tester starts and why Tab from the heading moves the other way, qa_script step 4 says the same thing to a human, and a new test case pins back < heading < #expense-desc in document order so a future reorder fails in CI rather than in QA. Two cheaper fixes were available and declined: dropping the heading-focus step (which answers by removing the announcement of the group name, the thing the ticket asks for) and moving the back control below the heading (which inverts reading order for every user, mouse included) — both are recorded in alternatives_considered. Objection 2: AC-5's clause about a group that no longer exists is unreachable — no delete route, no delete control, and a duplicate name is refused — and nothing in tests[] covered the fallback. Resolved by splitting the clause rather than dropping it: AC-5 now covers only what the browser shows (focus lands on the row that was open, matched by dataset.groupId) and says to wait for the rebuilt list before reading activeElement, because the restore is behind an await of GET /api/groups; the fallback moved to AC-11 with verify \"test\", which states plainly that no session can reach it and names the test case that does. A new tests[] case asserts the full `|| rows[0] || document.getElementById('group-name')` chain in showCreateView. Everything else in v1 was confirmed against the file and kept.",
     "mode": "committed"
   },
-  "touch_paths": [],
+  "touch_paths": [
+    "public/index.html",
+    "test/a11y-navigation.test.js"
+  ],
   "acceptance": [],
   "planned_route": [
     "plan",
