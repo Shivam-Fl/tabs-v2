@@ -85,6 +85,209 @@
   "stopped_at": null,
   "dispatched_stage": "plan",
   "validated_from": "plan",
-  "validated_at": "2026-09-26T20:00:07.490Z",
-  "validated_ac_changes": []
+  "validated_at": "2026-09-26T20:07:06.382Z",
+  "validated_ac_changes": [],
+  "validated_work_order": {
+    "issue": 27,
+    "version": 2,
+    "kind": "bug",
+    "reproduced": true,
+    "understanding": "GET /healthz is a constant. src/server.js:127-132 answers 200 {\"status\":\"ok\"} without touching the store, so it cannot report a failure the rest of the app is experiencing. The store is the one dependency: src/store.js:17-24 does JSON.parse over data/groups.json and throws when the file is corrupt, truncated or unreadable, and that throw happens inside every handler that calls store.load() — seven call sites in src/server.js (lines 136, 157, 187, 207, 254, 288, 327), of which only line 157 sits inside a try. The route on the app's own path therefore answers 503-worthy failures as 500 INTERNAL with the raw JSON.parse text in the message, while the health check says everything is fine. I reproduced both halves against the real server on an ephemeral port with STORE_PATH pointed at a corrupt file (see evidence). The fix is one guard in the one function that can leak the file — load() — plus a bounded probe on /healthz that uses it, and mapping the new error type to the standard envelope at the two places the throw can surface. The healthy body does not change, so the one existing test at test/server.test.js:495 still asserts exactly what it asserts today, and the suite of 149 cases still passes (verified this run).",
+    "root_cause": "store.load() lets the raw JSON.parse SyntaxError escape src/store.js, so (a) nothing in the codebase has a typed failure to test the store against, and (b) whatever the message says — which on Node 20+ embeds a fragment of the file — reaches the client through the generic INTERNAL path at src/server.js:177, 278, 348 and 364. /healthz then has nothing to check, so it returns a constant instead of a result.",
+    "approach": "0. WHERE THE APP'S DATA FILE ACTUALLY LIVES IN THE QA JOB — read this before writing a single verification recipe, because a bare relative path here reads correctly in a developer's checkout and silently means something else in CI.\n\n  In compose mode the code under test is NOT the workspace root. .github/workflows/sdlc-qa.yml:248-260 checks it out with `path: _pr`, so the app lives at `${workspace}/_pr`. The boot step at :293-303 runs `nohup bash -c \"cd _pr && $BOOT\"` with env.boot = `npm run sdlc:serve`, so the server process has cwd `${workspace}/_pr`. src/store.js:4 computes `DEFAULT_PATH = path.resolve('data','groups.json')` from that cwd, so the file the server opens, reads and writes is **`_pr/data/groups.json`** — never `data/groups.json` at the workspace root. The workflow's own seed step (:347-353) agrees: it is the only step that carries `working-directory: _pr`, and it runs `npm run sdlc:seed` there.\n\n  QA's shell, by contrast, runs at `${workspace}` — the 'Test it, adversarially' step (:391-418) sets no working-directory, and the only steps in the file that do are :263, :286 and :347. Nothing in .sdlc/agents/qa.md or .sdlc/memory/qa/environment.md tells QA this, which is why every recipe below spells the path out in full rather than using a relative one. Two traps follow, and both fail silently rather than loudly:\n\n  (a) The workspace root is itself a checkout of this same repository, and its package.json carries the same `sdlc:seed` script. So a bare `npm run sdlc:seed` from QA's cwd SUCCEEDS — it writes `${workspace}/data/groups.json`, a file the server never opens. The corruption and the repair would land in different directories and the endpoint would keep answering 200. Every seed and restore in this plan is therefore `cd _pr && npm run sdlc:seed`, or equivalently `npm --prefix _pr run sdlc:seed` (both were checked to run with cwd inside the package). Every corruption and deletion is written to the literal path `_pr/data/groups.json`. The same trap applies to `data/` itself: the root's `data/` is gitignored and absent, so a `printf ... > data/groups.json` either fails outright or, after a `mkdir`, writes a file nothing reads. Use `mkdir -p _pr/data` before writing if in doubt; the workflow's seed step has already created it, so this is belt and braces.\n\n  (b) The server re-reads the file on every request — load() has no cache — so there is no delay for a fix to take effect and no caching that could rescue a wrong path. The wrong path simply produces a correct-looking 200 forever.\n\n  The rest of the plan is three changes, smallest first, all in existing modules.\n\n1. src/store.js — the leak stops at the module boundary. Add an exported `StoreUnreadableError extends Error` with a fixed, safe message ('Group data store could not be read'), a `code` property of 'STORE_UNREADABLE', and the original error kept on `.cause` for the server's own stderr. Wrap the body of `load()` in try/catch — the `fs.readFileSync` and the `JSON.parse`, nothing else — and rethrow as `StoreUnreadableError`. `load()` still returns `{}` when the file does not exist: a first run serves an empty group list, so it is healthy and must stay healthy. Add an async `check()` to both stores: the file store attempts `fs.promises.readFile(p, 'utf8')` and `JSON.parse`s it, resolving on success and resolving ALSO on `err.code === 'ENOENT'` (an absent file is a first run, not a failure), and rethrowing anything else as `StoreUnreadableError`; `MemoryStore.check()` resolves. It uses `fs.promises`, not the sync path, so it never blocks the event loop and a timer can still fire while it is in flight. `createStore()` returns `check` alongside `load`/`save`/`reset` in both modes. Doing the ENOENT test inside the catch rather than an `existsSync` before the read is deliberate: an `existsSync`/read pair races a file that is created or deleted between the two, and in the delete direction it would report 503 for exactly the first-run case load() answers `{}` on.\n\n2. src/server.js — /healthz asks, and the error is mapped in the two places it can surface. The handler becomes:\n\n    // GET /healthz\n    if (route.resource === 'healthz') {\n      if (req.method !== 'GET') {\n        return errorResponse(res, 'METHOD_NOT_ALLOWED', 'Method not allowed', 405);\n      }\n      try {\n        await withDeadline(store.check());\n      } catch {\n        return errorResponse(res, 'STORE_UNREADABLE', 'Group data store could not be read', 503);\n      }\n      return jsonResponse(res, 200, { status: 'ok' });\n    }\n\n  `withDeadline(promise)` races against a timer and rejects with `StoreUnreadableError` if the timer wins; the timer is cleared in a `finally` so a pending timer never holds the event loop open and hangs `node --test`. The budget is `Number(process.env.HEALTH_TIMEOUT_MS) || 2000`, read INSIDE the handler on every request (not at module load) so a test can set it. A store object with no `check` throws a TypeError inside that try and is answered 503 — from a probe's point of view a store it cannot interrogate is one it cannot vouch for — and a test below asserts both factory branches do expose `check`, so that masking cannot hide a regression.\n\n  The healthy response stays byte-identical to today's `{\"status\":\"ok\"}` — the ticket puts any change to it out of scope, and it is already distinguishable from the failure (200 + a `status` key vs 503 + an `error` key). The unhealthy response is the standard envelope, `{ error: { code: 'STORE_UNREADABLE', message: 'Group data store could not be read' } }`, at 503 — 503 rather than 500 because the app is fine and its dependency is not, and 503 is the status a probe or load balancer acts on. No field of the store file appears in the body. The handler never touches `err.message`, so nothing from the store reaches that body even when the failure is one we did not classify.\n\n  Two mapping sites, because `store.load()` is called from seven places and six of them are outside any try/catch: the outer catch in `start()` (src/server.js:362-364), which the six reach, and the POST /api/groups catch (src/server.js:173-178), whose `store.load()` at :157 sits inside the try. Both add, before their existing branches, `if (err instanceof StoreUnreadableError) return storeUnreadableResponse(res);`. `storeUnreadableResponse` is one helper beside `errorResponse`. Every store-reading route then answers 503 `STORE_UNREADABLE` instead of 500 `INTERNAL`, and no response anywhere can carry a fragment of the data file.\n\n3. Tests — the failure is covered everywhere the 200 is, and the leak is asserted with a planted marker string rather than by reading the message.\n\nScreens/interfaces: this ticket has no UI. /healthz is JSON with no consumers in public/index.html (grepped: no reference), so there is no empty, loading, partial or error state to design, no focus to move, and no copy to invent beyond the two strings written out above. The response IS the surface, and its states are: 200 {status:ok}, 503 {error:{code,message}}, and 405 {error:{code:METHOD_NOT_ALLOWED}} for a non-GET.",
+    "files": [
+      {
+        "path": "src/store.js",
+        "action": "edit",
+        "change": "Add `export class StoreUnreadableError extends Error` with `super('Group data store could not be read')`, `this.name = 'StoreUnreadableError'`, `this.code = 'STORE_UNREADABLE'`, and the underlying error on `this.cause`. In `load()` (lines 17-24) wrap only the `fs.readFileSync` + `JSON.parse` in try/catch and rethrow as `new StoreUnreadableError(err)`; leave the `!fs.existsSync(p) -> {}` early return above the try, untouched. Add an async `check()` to the file store: `JSON.parse(await fs.promises.readFile(p, 'utf8'))` and resolve, with the catch resolving on `err.code === 'ENOENT'` (absent file = first run = healthy) and rethrowing `StoreUnreadableError` for anything else. Do NOT gate the read on an `existsSync` — that pair races. Add `check()` to `MemoryStore` that resolves. Return `check` from `createStore()` in both the memory and the file branch (lines 59-64) so every store the server is handed has it.",
+        "why": "This is the only function that can leak the data file, and the only place that knows what a store failure is. One guard here fixes all seven call sites instead of seven."
+      },
+      {
+        "path": "src/server.js",
+        "action": "edit",
+        "change": "Import `StoreUnreadableError` from './store.js' (line 15). Add `const HEALTH_TIMEOUT_MS = 2000;` and two helpers beside `errorResponse`: `storeUnreadableResponse(res)` returning `errorResponse(res, 'STORE_UNREADABLE', 'Group data store could not be read', 503)`, and `withDeadline(promise)` racing `promise` against `setTimeout` for `Number(process.env.HEALTH_TIMEOUT_MS) || HEALTH_TIMEOUT_MS` ms, rejecting with `new StoreUnreadableError(new Error('store check timed out'))` when the timer wins and `clearTimeout` in a `finally` so a pending timer never keeps the event loop alive. Read the env var inside the handler, not at module load. Replace the healthz body (lines 127-132) with the handler given in `approach`, keeping the 405 branch for a non-GET. Add `if (err instanceof StoreUnreadableError) return storeUnreadableResponse(res);` as the first branch of the catch at lines 173-178 (POST /api/groups) and of the outer catch at lines 362-364 (start()), the latter before its existing `errorResponse(res, 'INTERNAL', err.message, 500)`.",
+        "why": "The healthz route has to ask the store something, and the new error type has to be translated at both points it can escape from — the six unguarded `store.load()` calls and the one inside a try."
+      },
+      {
+        "path": "test/server.test.js",
+        "action": "edit",
+        "change": "Keep the existing `GET /healthz returns 200` test at line 495 exactly as it is — a memory store, 200, `data.status === 'ok'`. Add the file-mode cases listed in `tests[]`, each following the pattern already in test/store.test.js:22-34 (mkdtempSync, save and restore `process.env.STORE_PATH`, `rmSync` in a `finally`). Plant a unique marker string such as `LEAKCANARY_MEMBER_NAME` inside the corrupt file and assert the raw response text does not contain it. The store must be built through `createStore()` with STORE_PATH pointed at the temp file, not injected as a stub, so the assertion covers the real read path.",
+        "why": "The ticket asks for a test of the failure alongside the 200, and the leak is only provable if a known string is planted in the file first."
+      },
+      {
+        "path": "test/store.test.js",
+        "action": "edit",
+        "change": "Add unit cases for the new module contract: `load()` on a file holding invalid JSON throws `StoreUnreadableError` (not a SyntaxError) and its `.message` does not contain the file's content; `load()` on a missing file still returns `{}` unchanged (the existing case at line 22 already proves this — leave it); `check()` resolves on a missing file, resolves on a file written by `save()`, and rejects with `StoreUnreadableError` on a corrupt one; `MemoryStore.check()` resolves; `createStore()` returns a `check` function in both memory and file mode, so a future edit that drops it from one branch is caught here rather than surfacing as a permanent 503 in QA.",
+        "why": "The store's contract is now a promise and a throw, not just a return value, and it is testable without a socket."
+      }
+    ],
+    "tests": [
+      {
+        "path": "test/server.test.js",
+        "action": "edit",
+        "cases": [
+          "GET /healthz returns 200 with body {status:'ok'} when the store is healthy — the existing case at line 495, unchanged, kept in place as the ticket requires",
+          "GET /healthz returns 503 with error.code STORE_UNREADABLE when the store file holds invalid JSON, and the body is exactly the standard error envelope",
+          "GET /healthz returns 503 with error.code STORE_UNREADABLE when the store path is a directory (the read fails with EISDIR) — do NOT use chmod 000, which is a no-op for a root-owned test process and would make the case environment-dependent",
+          "GET /healthz returns 200 when the store file does not exist at all, because GET /api/groups answers 200 [] on the same store",
+          "POST /healthz still returns 405 METHOD_NOT_ALLOWED",
+          "the two responses are separable from the status line and the presence of the `error` key alone: 200 carries `status` and no `error`, 503 carries `error.code` STORE_UNREADABLE and no `status`",
+          "GET /api/groups against a corrupt store returns 503 STORE_UNREADABLE, not 500 INTERNAL",
+          "POST /api/groups against a corrupt store returns 503 STORE_UNREADABLE — this is the one call site whose store.load() sits inside the try at server.js:157, so it is the case that fails if only the outer catch is patched",
+          "GET /api/groups/:id/balances, /api/groups/:id/settlement and /api/groups/:id/expenses against a corrupt store each return 503 STORE_UNREADABLE",
+          "the raw response text for every one of those routes contains neither the marker string planted in the corrupt file nor a JSON.parse message quoting it",
+          "a store whose check() never settles still answers /healthz with 503 within HEALTH_TIMEOUT_MS (set process.env.HEALTH_TIMEOUT_MS to 50 for the case) instead of hanging, and the test file still exits"
+        ]
+      },
+      {
+        "path": "test/store.test.js",
+        "action": "edit",
+        "cases": [
+          "load() on a file of invalid JSON throws StoreUnreadableError",
+          "the StoreUnreadableError message does not contain any of the corrupt file's content",
+          "load() on a missing file still returns {} (the existing case, unchanged)",
+          "check() resolves when the store file is missing",
+          "check() resolves after save() has written a valid file",
+          "check() rejects with StoreUnreadableError on a corrupt file",
+          "MemoryStore.check() resolves",
+          "createStore() returns a check function in memory mode and in file mode"
+        ]
+      }
+    ],
+    "acceptance": [
+      {
+        "id": "AC-1",
+        "check": "With a readable, parseable store file, GET /healthz answers 200 with a body exactly {\"status\":\"ok\"} — unchanged from today.",
+        "how_to_verify": "The app under test runs with cwd _pr (sdlc-qa.yml:293-303), so its data file is _pr/data/groups.json, not data/groups.json. Seed it with `cd _pr && npm run sdlc:seed`, then `curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/healthz` -> 200, and `curl -s http://localhost:3000/healthz` -> {\"status\":\"ok\"}",
+        "verify": "api"
+      },
+      {
+        "id": "AC-2",
+        "check": "With the app's store file replaced by one that is not valid JSON, GET /healthz answers 503 with {\"error\":{\"code\":\"STORE_UNREADABLE\",\"message\":\"Group data store could not be read\"}} and no other status code.",
+        "how_to_verify": "Write the corrupt file to the path the server actually opens — _pr/data/groups.json, NOT data/groups.json, because the server's cwd is _pr and the workspace root's data/ is a directory it never reads: `mkdir -p _pr/data && printf '{\"seed-goa\": {\"members\": [' > _pr/data/groups.json`. Then `curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/healthz` -> 503 and `curl -s http://localhost:3000/healthz` -> {\"error\":{\"code\":\"STORE_UNREADABLE\",\"message\":\"Group data store could not be read\"}}. Restore with `cd _pr && npm run sdlc:seed` — from the workspace root that command also succeeds and writes a data/groups.json the server never opens, which is the silent failure this recipe is written to avoid. Confirm afterwards that `ls -l _pr/data/groups.json` parses as JSON.",
+        "verify": "api"
+      },
+      {
+        "id": "AC-3",
+        "check": "The healthy and unhealthy /healthz responses are distinguishable from the status line and the presence of the `error` key alone, without reading the message: 200 carries a top-level `status` and no `error`; 503 carries a top-level `error` and no `status`.",
+        "how_to_verify": "Compare the two curl bodies from AC-1 and AC-2; assert with `jq 'has(\"error\")'` that only the second is true. Both must be taken with the store file in the state each recipe states — _pr/data/groups.json.",
+        "verify": "api"
+      },
+      {
+        "id": "AC-4",
+        "check": "No response body from any route quotes content from the app's store file. With _pr/data/groups.json corrupt, GET /api/groups, GET /api/groups/:id/balances, GET /api/groups/:id/settlement, GET /api/groups/:id/expenses and POST /api/groups each answer 503 STORE_UNREADABLE, and the raw response text contains neither a planted marker string written into that file nor any JSON.parse message.",
+        "how_to_verify": "`mkdir -p _pr/data && printf '{\"seed-goa\": {\"members\": [LEAKCANARY' > _pr/data/groups.json` (the marker goes in _pr/data/groups.json, the file the server opens). Then curl each of the five routes and grep every body for LEAKCANARY (expect no match) and for 'is not valid JSON' (expect no match). Restore with `cd _pr && npm run sdlc:seed`.",
+        "verify": "api"
+      },
+      {
+        "id": "AC-5",
+        "check": "With no store file at all — a first run — GET /healthz answers 200, because GET /api/groups answers 200 with an empty list on that same store.",
+        "how_to_verify": "`rm -f _pr/data/groups.json` (the app's file, under _pr) then `curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/healthz` -> 200 and `curl -s http://localhost:3000/api/groups` -> {\"groups\":[]}. Restore with `cd _pr && npm run sdlc:seed`.",
+        "verify": "api"
+      },
+      {
+        "id": "AC-6",
+        "check": "POST /healthz still answers 405 with error.code METHOD_NOT_ALLOWED, as it does today.",
+        "how_to_verify": "`curl -s -X POST -o /dev/null -w '%{http_code}' http://localhost:3000/healthz` -> 405. Needs no store state, and the answer must be 405 whether or not the store is healthy.",
+        "verify": "api"
+      },
+      {
+        "id": "AC-7",
+        "check": "A store whose read never completes makes /healthz answer 503 rather than hang: the response arrives within HEALTH_TIMEOUT_MS (default 2000ms) of the request.",
+        "how_to_verify": "node --test test/server.test.js runs the case 'a store whose check() never settles still answers /healthz with 503 within HEALTH_TIMEOUT_MS', which sets HEALTH_TIMEOUT_MS=50 and asserts 503 and a completed request",
+        "verify": "test"
+      },
+      {
+        "id": "AC-8",
+        "check": "node --test passes with the new cases added, and the pre-existing case at test/server.test.js:495 ('GET /healthz returns 200') is still present and still asserts both 200 and data.status === 'ok'.",
+        "how_to_verify": "npm run sdlc:verify exits 0 with 149 pre-existing cases plus the new ones (149 confirmed passing on this branch before the change); grep -n \"GET /healthz returns 200\" test/server.test.js still matches, and the case body is unchanged",
+        "verify": "test"
+      }
+    ],
+    "qa_script": [
+      "Before anything else, know where the app is. The code under test is checked out to _pr and booted with `cd _pr` (sdlc-qa.yml:248-260, :293-303), so the server's data file is _pr/data/groups.json and your shell's cwd is the workspace root. A bare `data/groups.json` and a bare `npm run sdlc:seed` both name the wrong place: the root is a checkout of this same repo, so seeding from there succeeds and writes a file the server never opens. Use `_pr/data/groups.json` and `cd _pr && npm run sdlc:seed` throughout.",
+      "npm run sdlc:verify — 149 existing cases must still pass, then the new ones. Record the new total.",
+      "`cd _pr && npm run sdlc:seed`, then GET / in a browser and confirm the app still works end to end: the group list shows the Goa trip, its balances and settlement render, adding an expense still succeeds. This route is not on the app's path, so a wrong answer here should break nothing a user sees — if it does, that is a finding.",
+      "curl -s -w '\\n%{http_code}\\n' http://localhost:3000/healthz on the healthy store. Expect 200 {\"status\":\"ok\"}.",
+      "Break the store the server actually opens: mkdir -p _pr/data && printf '{\"seed-goa\": {\"members\": [LEAKCANARY_MEMBER_NAME' > _pr/data/groups.json. Confirm with `ls -l _pr/data/groups.json` that the file you just wrote is the one you wrote.",
+      "curl -s -w '\\n%{http_code}\\n' http://localhost:3000/healthz. Expect 503 and error.code STORE_UNREADABLE, and confirm LEAKCANARY_MEMBER_NAME appears nowhere in the body.",
+      "curl -s http://localhost:3000/api/groups. Expect 503 STORE_UNREADABLE — NOT 500 INTERNAL, and NOT a message containing LEAKCANARY_MEMBER_NAME or 'is not valid JSON'. This is the ticket's actual complaint about lines 177/278/348/364.",
+      "curl -s -X POST -H 'Content-Type: application/json' -d '{\"name\":\"QA\",\"members\":[\"A\"]}' http://localhost:3000/api/groups. Also expect 503 STORE_UNREADABLE: this is the call site whose store read sits inside the try, and it is the one a partial fix misses.",
+      "curl -s http://localhost:3000/api/groups/seed-goa/balances, /settlement and /expenses. Each 503 STORE_UNREADABLE, none quoting the file.",
+      "Restore: cd _pr && npm run sdlc:seed (not a bare `npm run sdlc:seed` — that restores a file the server does not read). Confirm /healthz is 200 again and the app is usable, and confirm `jq . _pr/data/groups.json` parses.",
+      "Empty-store case: rm -f _pr/data/groups.json. /healthz must be 200, not 503 — a first run is not a failure.",
+      "Restore with `cd _pr && npm run sdlc:seed` and leave _pr/data/groups.json seeded.",
+      "Read the 503 with fresh eyes: does the body alone tell you the data store is the thing that is wrong? If you needed the source to know that, the message is wrong."
+    ],
+    "risks": [
+      "The response change on the data routes is real: a caller that matches on 500 will now see 503, and the code changes from INTERNAL to STORE_UNREADABLE. Nothing in this repo, its tests or its UI reads either (grepped: zero occurrences of INTERNAL in test/), and both paths already mean 'the app is broken', but it is the one externally visible consequence beyond /healthz itself.",
+      "The default 2000ms budget could in principle report a healthy store as unhealthy on a very slow mount. It is deliberately generous for a local JSON file and overridable per-process with HEALTH_TIMEOUT_MS, which is what an operator with a slow mount would set.",
+      "The new cases mutate process.env.STORE_PATH and process.env.HEALTH_TIMEOUT_MS. That matches the existing pattern in test/store.test.js and node:test runs cases in a file sequentially, but a case that forgets its `finally` restore will fail every later case in the file rather than one.",
+      "A verification recipe that names the workspace-root data/ instead of _pr/data/ will report this ticket as failing against a correct implementation. That is why every recipe in acceptance[].how_to_verify and qa_script names the full `_pr/data/groups.json` and the `cd _pr && npm run sdlc:seed` form in the step text, and why the first qa_script step states the layout before any check runs. This is the single largest execution risk in the plan and it is in the recipes, not the code.",
+      "No path in forbidden_paths is touched: .sdlc/memory/**, docs/spec/**, docs/prd.md, docs/trd.md, docs/ui.md, .github/** and .sdlc/** are all untouched. The error-code list in .sdlc/memory/conventions.md will need STORE_UNREADABLE added to it — that is the Librarian's file, not this ticket's, and the implementer must not edit it.",
+      "No host is added and nothing is deployed, so the new 503 is observed only by whoever calls the endpoint. See residual_risks."
+    ],
+    "out_of_scope": [
+      "CHANGELOG.md. Every entry in it landed in a `chore: changelog and version bump` commit, so it is written by the release stage, not by feature tickets. This change adds no user-visible behaviour, and the release stage can log it if it wants.",
+      "Adding STORE_UNREADABLE to the error-code list in .sdlc/memory/conventions.md and to the error table in .sdlc/memory/qa/environment.md. Both are the Librarian's files and are forbidden to this ticket; the Librarian picks them up from the merge. Neither .sdlc/agents/qa.md nor .sdlc/memory/qa/environment.md records that the app's data directory sits under _pr/ in compose mode, which is the gap that made the first version of this plan unverifiable — adding that note is a change to a forbidden file and is named here rather than smuggled into files[].",
+      "Deploying anywhere, and any alerting. There is no host until #21 decides one.",
+      "A new endpoint. /healthz stays the only health surface, and its healthy body is unchanged.",
+      "Making the six unguarded `store.load()` calls on the data routes asynchronous so they, too, can be interrupted. The health check is bounded; the routes still block. See residual_risks — the fix is an ordering change across seven call sites and is a different ticket.",
+      "The other two Operations items in docs/spec/tabs.md — the README deploy section and richer seed fixtures — which the ticket names as separate work."
+    ],
+    "alternatives_considered": [
+      {
+        "approach": "Wrap the store in a try/catch proxy inside start() and leave src/store.js alone.",
+        "rejected_because": "It fixes the symptom at one call site while the raw parse error still escapes the module that owns the file, and it duplicates a guard that belongs in one place. The planner rule is one guard in the shared function: fix load() and all seven callers are correct, including the two that do not exist yet."
+      },
+      {
+        "approach": "Have /healthz call the existing synchronous store.load() and skip the deadline.",
+        "rejected_because": "A synchronous readFileSync cannot be interrupted by a JavaScript timer — it blocks the event loop, so no timeout can fire. The ticket names this as the one thing to get right: the check has to fail rather than wait forever. Hence an async fs.promises probe raced against a timer in the handler."
+      },
+      {
+        "approach": "Answer 500 instead of 503 when the store is unreadable.",
+        "rejected_because": "500 says the server broke; here the app is fine and its dependency is not. 503 is the status a probe or load balancer acts on, and it keeps 'you sent something wrong' (400) apart from 'we broke' — the distinction the spec's Operations section is asking for."
+      },
+      {
+        "approach": "Fix only /healthz and leave the routes returning 500 INTERNAL with the parse text.",
+        "rejected_because": "The ticket names src/server.js:177, 278, 348 and 364 as the leak, and it is the same root cause. The mapping is two catch blocks; leaving them out would ship a plan that fixes the check and leaves the defect the ticket was filed about."
+      },
+      {
+        "approach": "Report every dependency from /healthz, or add a readiness endpoint alongside it.",
+        "rejected_because": "The store is the only dependency, and the ticket puts new health surfaces and any change to the healthy body out of scope. One endpoint, one check, body unchanged."
+      },
+      {
+        "approach": "Gate check() on an existsSync() before the read, as an obvious reading of the code would suggest.",
+        "rejected_because": "existsSync followed by a read is a TOCTOU pair, and in the delete direction it makes check() answer 503 for exactly the first-run case load() answers {} on — /healthz would disagree with GET /api/groups about whether the same store is usable. Handling ENOENT inside the catch keeps the two answers identical."
+      },
+      {
+        "approach": "Have the health check import the store module and read the file itself, rather than going through the injected store.",
+        "rejected_because": "The server already receives a store — a MemoryStore in every existing test, and the file store in production. Reading the file behind the injected store's back would make /healthz report on a file the running app is not using, which is the same class of bug this ticket exists to fix."
+      }
+    ],
+    "assumptions": [
+      "createStore() and its load/save/reset are called only from src/server.js and bin/seed.js — grepped across src, test and bin. Adding check() to the factory therefore reaches every store the server is handed, including the MemoryStore instances in the existing tests.",
+      "No test asserts the 500 INTERNAL response or the text of any INTERNAL message (grepped: zero occurrences in test/), so tightening the store failure path breaks nothing existing.",
+      "The undocumented timeout override is a process env var rather than a config file, because this repo has no config surface for the app itself and .sdlc/config.yml is forbidden."
+    ],
+    "unknowns": [
+      "Whether the host #21 eventually picks has a data store slow enough that 2000ms is too tight. The env override exists for exactly that, and the answer is not knowable until that ticket lands.",
+      "Whether an operator wants the underlying parse error persisted anywhere beyond the process's stderr. There is no log sink in this repo, so stderr is all there is; adding one is a separate decision."
+    ],
+    "residual_risks": [
+      "The six data routes still read the store synchronously. A genuinely hung mount will wedge them exactly as it does today — /healthz will now correctly report 503 while GET /api/groups hangs rather than answering. The health check is bounded; the routes are not. Fixing that means async load plus the write-path ordering rule applied across seven call sites, which is larger than this ticket and is listed in out_of_scope rather than silently skipped.",
+      "errorResponse(res, 'INTERNAL', err.message, 500) at src/server.js:177/278/348/364 still forwards an arbitrary error message verbatim for non-store failures. After this change it cannot carry data-file content, because load() no longer throws raw — but a future error whose message embeds user input would reach a client the same way. The healthz path is the exception: it never passes err.message.",
+      "Nothing acts on the new 503. There is no host, no supervisor and no monitor, so a probe that is never called still tells nobody. The ticket puts deployment and alerting out of scope, and the value here is that the endpoint can finally answer the question when something does call it.",
+      "The health check proves the store is readable and parseable, not that the data in it is coherent. A file that parses but holds a group whose balances do not net to zero still passes /healthz and fails on BALANCES_INVARIANT at the read. That is a different failure with its own code, and widening the check to cover it is out of scope."
+    ],
+    "evidence": [
+      "Reproduced on this branch (Node v22.23.2) by booting the real server with STORE_PATH pointed at a file containing `{\"seed-goa\": {\"members\": [LEAKCANARY_MEMBER_NAME` on port 3111. GET /healthz -> 200 `{\"status\":\"ok\"}` — the constant, untouched by a store the app demonstrably cannot read.",
+      "Same run, GET /api/groups -> 500 `{\"error\":{\"code\":\"INTERNAL\",\"message\":\"Unexpected token 'L', ...\\\"embers\\\": [LEAKCANARY\\\"... is not valid JSON\"}}`. The marker planted in the data file is quoted back to the client — the leak the ticket names at src/server.js:177.",
+      "Same run, GET /api/groups/seed-goa/balances -> 500 with the same marker-bearing message, and POST /api/groups with body {\"name\":\"QA\",\"members\":[\"A\"]} -> 500 with the same message. That third one is the call site at src/server.js:157 whose store.load() is inside the try, and it confirms a fix to the outer catch alone would not be enough.",
+      "src/store.js:4 `DEFAULT_PATH = path.resolve('data','groups.json')` is resolved from process.cwd(), and sdlc-qa.yml:293-303 boots the app as `cd _pr && $BOOT` — hence _pr/data/groups.json is the file the server opens, while QA's shell runs at the workspace root. This is the defect in the previous version of this plan's recipes and it is now corrected throughout.",
+      "`npm run sdlc:verify` on the unmodified branch: 149 tests, 149 pass, 0 fail."
+    ],
+    "confidence": 88,
+    "confidence_rationale": "Both claims in the ticket were reproduced against the real server on an ephemeral port, and the leak is confirmed on this Node (v22.23.2) with the exact fragment-quoting message the ticket describes. The file list is small, every call site of store.load() was grepped (seven, of which six share one catch and one does not), and the change breaks no existing test — 149 pass today and zero of them assert 500 INTERNAL or an INTERNAL message. This version is more confident than v1 for one specific reason: the objection that sank v1 was a fact about .github/workflows/sdlc-qa.yml that I have now read and quoted into the plan, so the recipes are checkable against the workflow rather than against a guess about it. The confidence is held below the high nineties by two things that are judgement rather than fact — the 2000ms budget and the choice of 503 — both argued above, neither obviously wrong. Nothing here needs a person to have decided before it can be implemented, and nothing in the repo is in the way."
+  }
 }
