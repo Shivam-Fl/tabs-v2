@@ -1,6 +1,9 @@
 import http from 'node:http';
 import test from 'node:test';
 import assert from 'node:assert';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { start } from '../src/server.js';
 import { createStore } from '../src/store.js';
 
@@ -1253,5 +1256,175 @@ test('non-POST methods on /api/groups/:id/settlements return 405 METHOD_NOT_ALLO
     assert.strictEqual(read.data.error.code, 'METHOD_NOT_ALLOWED');
   } finally {
     close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The health check against a real file store, and the leak the ticket is about.
+//
+// These cases build the store through createStore() with STORE_PATH pointed at a temp
+// file rather than injecting a stub: the claim under test is about the read the running
+// app actually performs, and a hand-made store object would not exercise it.
+const CORRUPT_BODY = '{"seed-goa": {"members": [LEAKCANARY_MEMBER_NAME';
+const MARKER = 'LEAKCANARY_MEMBER_NAME';
+
+async function withFileStore(fn) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tabs-store-'));
+  const storePath = path.join(tmpDir, 'groups.json');
+  const prev = process.env.STORE_PATH;
+  process.env.STORE_PATH = storePath;
+  let server = null;
+  try {
+    server = await start({ port: 0, store: createStore() });
+    return await fn(server.url, storePath);
+  } finally {
+    if (server) server.close();
+    if (prev === undefined) delete process.env.STORE_PATH;
+    else process.env.STORE_PATH = prev;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+// The raw text, not the parsed body: the leak is a quoted fragment inside a JSON string,
+// and asserting on the parsed message alone would depend on how it was escaped.
+async function getRaw(pathname, baseUrl) {
+  const res = await fetch(new URL(pathname, baseUrl));
+  return { status: res.status, text: await res.text() };
+}
+
+test('GET /healthz returns 503 STORE_UNREADABLE when the store file holds invalid JSON', async () => {
+  await withFileStore(async (url, storePath) => {
+    fs.writeFileSync(storePath, CORRUPT_BODY, 'utf8');
+
+    const { status, data } = await get('/healthz', url);
+    assert.strictEqual(status, 503);
+    // The standard envelope, exactly — no extra fields, and nothing from the file.
+    assert.deepStrictEqual(data, {
+      error: { code: 'STORE_UNREADABLE', message: 'Group data store could not be read' },
+    });
+  });
+});
+
+test('GET /healthz returns 503 STORE_UNREADABLE when the store path is a directory', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tabs-store-dir-'));
+  const prev = process.env.STORE_PATH;
+  process.env.STORE_PATH = tmpDir;
+  let server = null;
+  try {
+    server = await start({ port: 0, store: createStore() });
+    const { status, data } = await get('/healthz', server.url);
+    assert.strictEqual(status, 503);
+    assert.strictEqual(data.error.code, 'STORE_UNREADABLE');
+  } finally {
+    server.close();
+    if (prev === undefined) delete process.env.STORE_PATH;
+    else process.env.STORE_PATH = prev;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('GET /healthz returns 200 when there is no store file at all', async () => {
+  await withFileStore(async (url, storePath) => {
+    assert.ok(!fs.existsSync(storePath), 'the temp store file was never absent');
+
+    const { status, data } = await get('/healthz', url);
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.status, 'ok');
+
+    // The two routes must agree about one store: a first run is healthy, so the list is
+    // empty and readable rather than failing.
+    const groups = await get('/api/groups', url);
+    assert.strictEqual(groups.status, 200);
+    assert.deepStrictEqual(groups.data.groups, []);
+  });
+});
+
+test('POST /healthz returns 405 METHOD_NOT_ALLOWED whether or not the store is healthy', async () => {
+  await withFileStore(async (url, storePath) => {
+    // The method is refused before the store is ever asked, so the answer is the same
+    // in both store states — a broken store must not turn a wrong verb into a 503.
+    const res = await fetch(new URL('/healthz', url), { method: 'POST' });
+    assert.strictEqual(res.status, 405);
+    const data = await res.json();
+    assert.strictEqual(data.error.code, 'METHOD_NOT_ALLOWED');
+
+    fs.writeFileSync(storePath, CORRUPT_BODY, 'utf8');
+    const again = await fetch(new URL('/healthz', url), { method: 'POST' });
+    assert.strictEqual(again.status, 405);
+  });
+});
+
+// The body alone has to say which of the two states it is, without a message read: 200
+// carries `status` and no `error`, 503 carries `error` and no `status`.
+test('the healthy and unhealthy /healthz bodies are separable by the error key alone', async () => {
+  await withFileStore(async (url, storePath) => {
+    const healthy = await getRaw('/healthz', url);
+    assert.strictEqual(healthy.status, 200);
+    assert.deepStrictEqual(JSON.parse(healthy.text), { status: 'ok' });
+
+    fs.writeFileSync(storePath, CORRUPT_BODY, 'utf8');
+    const unhealthy = await getRaw('/healthz', url);
+    assert.strictEqual(unhealthy.status, 503);
+    const body = JSON.parse(unhealthy.text);
+    assert.ok(!('status' in body), 'the 503 body still carries a status key');
+    assert.strictEqual(body.error.code, 'STORE_UNREADABLE');
+  });
+});
+
+test('every store-reading route answers 503 STORE_UNREADABLE on a corrupt file, and quotes nothing', async () => {
+  await withFileStore(async (url, storePath) => {
+    fs.writeFileSync(storePath, CORRUPT_BODY, 'utf8');
+
+    // GET /api/groups and the three group sub-resources read the store outside any try
+    // of their own; POST /api/groups is the one whose store.load() sits inside one, so
+    // it is the case a fix to the outer catch alone would miss.
+    const requests = [
+      ['GET', '/api/groups', null],
+      ['GET', '/api/groups/seed-goa/balances', null],
+      ['GET', '/api/groups/seed-goa/settlement', null],
+      ['GET', '/api/groups/seed-goa/expenses', null],
+      ['POST', '/api/groups', { name: 'QA', members: ['A'] }],
+    ];
+
+    for (const [method, pathname, body] of requests) {
+      const res = await fetch(new URL(pathname, url), {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: body === null ? undefined : JSON.stringify(body),
+      });
+      const text = await res.text();
+      const label = `${method} ${pathname}`;
+      assert.strictEqual(res.status, 503, label);
+      assert.strictEqual(JSON.parse(text).error.code, 'STORE_UNREADABLE', label);
+      // The defect itself: neither the planted marker nor the parse error's own wording.
+      assert.ok(!text.includes(MARKER), `${label} quoted the data file`);
+      assert.ok(!text.includes('is not valid JSON'), `${label} quoted the parse error`);
+    }
+  });
+});
+
+// A store whose read never finishes is the case the deadline exists for. A synchronous
+// read cannot be interrupted by a timer, which is why the store's probe is async.
+test('a store whose check() never settles answers /healthz with 503 within HEALTH_TIMEOUT_MS', async () => {
+  const store = {
+    load: () => ({}),
+    save: () => {},
+    reset: () => {},
+    check: () => new Promise(() => {}),
+  };
+  const prev = process.env.HEALTH_TIMEOUT_MS;
+  process.env.HEALTH_TIMEOUT_MS = '50';
+  const { close, url } = await start({ port: 0, store });
+  try {
+    const startedAt = Date.now();
+    const { status, data } = await get('/healthz', url);
+    const elapsed = Date.now() - startedAt;
+    assert.strictEqual(status, 503);
+    assert.strictEqual(data.error.code, 'STORE_UNREADABLE');
+    assert.ok(elapsed < 2000, `/healthz took ${elapsed}ms to answer`);
+  } finally {
+    close();
+    if (prev === undefined) delete process.env.HEALTH_TIMEOUT_MS;
+    else process.env.HEALTH_TIMEOUT_MS = prev;
   }
 });

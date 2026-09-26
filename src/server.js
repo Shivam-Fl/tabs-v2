@@ -12,8 +12,13 @@ import {
   InvalidInputError,
   SettlementDuplicateError,
 } from './domain.js';
-import { createStore } from './store.js';
+import { createStore, StoreUnreadableError } from './store.js';
 import { splitEqual, splitByShares } from './money.js';
+
+// Generous for a local JSON file, and overridable per process with HEALTH_TIMEOUT_MS for
+// an operator whose mount is slow enough to need it. Read per request, not at module
+// load, so a test can set it.
+const HEALTH_TIMEOUT_MS = 2000;
 
 let htmlCache = null;
 
@@ -64,6 +69,28 @@ function htmlResponse(res, statusCode, html) {
 
 function errorResponse(res, code, message, statusCode = 400) {
   jsonResponse(res, statusCode, { error: { code, message } });
+}
+
+// 503, not 500: the app is fine and its one dependency is not, and 503 is the status a
+// probe or load balancer acts on. The message is fixed and the handler never reaches for
+// err.message, so nothing from the store file can ride along in this body.
+function storeUnreadableResponse(res) {
+  return errorResponse(res, 'STORE_UNREADABLE', 'Group data store could not be read', 503);
+}
+
+// A health check that waits forever is not a health check. The store's own probe is async
+// so a timer can still fire while it is in flight; racing it here is what turns a wedged
+// disk into an answer. The timer is cleared in the finally because a pending one keeps
+// the event loop alive and hangs `node --test` after the last case has run.
+function withDeadline(promise) {
+  let timer;
+  const expiry = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new StoreUnreadableError(new Error('store check timed out'))),
+      Number(process.env.HEALTH_TIMEOUT_MS) || HEALTH_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([promise, expiry]).finally(() => clearTimeout(timer));
 }
 
 function parseRoute(urlPath) {
@@ -123,10 +150,17 @@ async function handleRequest(req, res, store) {
     return errorResponse(res, 'METHOD_NOT_ALLOWED', 'Method not allowed', 405);
   }
 
-  // GET /healthz
+  // GET /healthz — the one route that asks the store a question instead of assuming.
   if (route.resource === 'healthz') {
     if (req.method !== 'GET') {
       return errorResponse(res, 'METHOD_NOT_ALLOWED', 'Method not allowed', 405);
+    }
+    try {
+      await withDeadline(store.check());
+    } catch {
+      // Deliberately empty of detail, including for a failure we never classified: a
+      // store this process cannot interrogate is one it cannot vouch for either way.
+      return storeUnreadableResponse(res);
     }
     return jsonResponse(res, 200, { status: 'ok' });
   }
@@ -173,6 +207,11 @@ async function handleRequest(req, res, store) {
     } catch (err) {
       if (err instanceof InvalidInputError) {
         return errorResponse(res, err.code, err.message, 400);
+      }
+      // Before the generic branch, and only here: this is the one call site whose
+      // store.load() sits inside a try, so the outer catch in start() never sees it.
+      if (err instanceof StoreUnreadableError) {
+        return storeUnreadableResponse(res);
       }
       return errorResponse(res, 'INTERNAL', err.message, 500);
     }
@@ -360,6 +399,13 @@ export function start({ port, store }) {
     try {
       await handleRequest(req, res, activeStore);
     } catch (err) {
+      // The six data routes call store.load() outside any try of their own, so this
+      // catch is where an unreadable store surfaces for them. Without this branch they
+      // answered 500 INTERNAL carrying the JSON.parse text, which quotes a fragment of
+      // the data file straight back to the client.
+      if (err instanceof StoreUnreadableError) {
+        return storeUnreadableResponse(res);
+      }
       errorResponse(res, 'INTERNAL', err.message, 500);
     }
   });
