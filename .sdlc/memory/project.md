@@ -39,16 +39,14 @@ These hold for every ticket, whatever it asks for.
 - Marking a settlement as done is itself a ledger entry; balances are always derived from the full history of expenses and settlements, never mutated in place.
 
 ## Commands
-- `sdlc:verify` — `node --test test/`
-- `sdlc:serve` — `node src/server.js`
+- `sdlc:verify` — `node --test` (no path argument: `node --test` discovers `test/` itself)
+- `sdlc:serve` — `node src/server.js`, port 3000
 - `sdlc:seed` — `node bin/seed.js`
 - `sdlc:ready` — `curl -sf http://localhost:3000/`
 
-Stubbed for now:
-- sdlc:verify is 'exit 0' until the first ticket lands src/money.js or src/domain.js with tests — the epic's money-logic-first ticket must replace the stub with 'node --test test/' and say so in its acceptance criteria.
-- sdlc:serve is 'exit 0' until the first ticket lands src/server.js and public/; that ticket must replace the stub with 'node src/server.js' listening on port 3000, matching env.base_url in .sdlc/config.yml.
-- sdlc:seed is 'exit 0' until src/store.js exists; the ticket that adds persistence should ship bin/seed.js writing a synthetic Goa-trip group so QA never needs real records.
-- sdlc:ready is a stub until the server exists; then it polls GET / on localhost:3000, matching env.ready in .sdlc/config.yml.
+All four are real, not stubs. The seeds each had as a placeholder have landed: `src/money.js`
+and `src/domain.js` with unit tests, `src/server.js` and `public/` on port 3000, and
+`bin/seed.js` writing a synthetic group so QA never needs real records.
 
 ## Deploy
 No hosted deployment, deliberately. QA drives the compose-mode environment defined in .sdlc/config.yml: 'npm run sdlc:serve' boots the app on localhost:3000 inside the workflow runner, and the URL allowlist (localhost:*) matches. The JSON data file lives beside the process and is ephemeral per run, which seed fixtures cover. A public preview is not planned; if one is ever wanted it is a new issue, because the JSON-file store is the first thing a real deployment would replace.
