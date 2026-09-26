@@ -10,6 +10,7 @@
     "sdlc:verify": "node --test",
     "sdlc:serve": "node src/server.js",
     "sdlc:seed": "node bin/seed.js",
+    "sdlc:seed:force": "node bin/seed.js --force",
     "sdlc:ready": "curl -sf http://localhost:3000/"
   }
 }
