@@ -12,13 +12,16 @@
 
 ## Server patterns
 - JSON API with explicit error responses: `{ error: { code: '...', message: '...' } }`.
-- Error codes: `INVALID_JSON`, `METHOD_NOT_ALLOWED`, `GROUP_NAME_TAKEN`, `BALANCES_INVARIANT`, `SETTLEMENT_MEMBER_UNKNOWN`, `SETTLEMENT_SELF`, `SETTLEMENT_DUPLICATE`.
+- Error codes: the full list, with statuses, is in [qa/environment.md](qa/environment.md) — kept
+  in one place on purpose, since a second partial copy here is what let it drift. The rule
+  behind it: a new validation failure is a new `InvalidInputError(code, message)` in
+  `src/domain.js` (→ 400), and it must be added to that table in the same change.
 - Body size limit: 64 KB (returns 400 `INVALID_JSON`).
 - Non-JSON primitives (`null`, `[]`, `"string"`, `123`) in POST bodies → 400 `INVALID_JSON`.
 - **Write-path ordering:** In any handler that reads the store, modifies it, and writes it back, `store.load()` must come *after* every `await` (typically `await parseBody(req)`). Placing it before an `await` lets two concurrent requests load the same snapshot and one write overwrites the other. Error precedence follows: body parsing happens before the group lookup, so a request with both bad JSON and a nonexistent group returns 400, not 404.
 
 ## Tests
-- `node --test test/` is `sdlc:verify`.
+- `node --test` is `sdlc:verify` (bare — it discovers `test/` on its own; do not append a path).
 - Unit tests for pure logic in `src/money.js` and `src/domain.js`.
 - Integration tests boot the server on an ephemeral port.
 

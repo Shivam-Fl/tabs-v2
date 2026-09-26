@@ -45,9 +45,26 @@ Prefer these over anything derived from text or DOM position.
 | Panel | `#settlement-panel` |
 | Error | `#settlement-error` (class `error`) |
 | List | `#settlement-list` (class `panel-list`) |
-| Pending transfer | `.transfer` (li with 'Mark done' button) |
-| Done transfer button | `.transfer-done-btn` (inside `.transfer`) |
-| Done transfer row | `.transfer-done` (class — opacity 0.6, line-through, CSS `::before` adds `✓`) |
+| Any transfer row (done *or* pending) | `.transfer` |
+| **Pending** transfer row | `.transfer:not(.transfer-done)` — see below |
+| Done transfer row | `.transfer-done` (added on top of `.transfer`) |
+| Done transfer button | `.transfer-done-btn` (only ever inside a pending row) |
+
+**`.transfer` is on every row, not just pending ones.** A done row gets
+`class="transfer transfer-done"`; a pending row gets `class="transfer"` plus a
+`.transfer-done-btn`. So `document.querySelectorAll('.transfer').length` counts history *and*
+outstanding transfers together, and a test asserting "one pending transfer left" against it
+passes for the wrong reason and then fails the moment a second transfer is recorded. Count
+pending with `.transfer:not(.transfer-done)`, or — more robustly, because it does not depend on
+the class split at all — count `.transfer-done-btn`, which exists on pending rows only.
+
+Two more things about this panel that make tests flaky rather than wrong:
+- **Done rows render first.** The panel is ordered history-then-outstanding, so `.transfer`
+  index 0 is the oldest done transfer, not the first pending one. Never index into it.
+- **`.empty-state` disappears as soon as one transfer is done.** A group whose only transfer
+  has been recorded still has one line of content, so the "No settlements yet." placeholder is
+  gone while a transfer is still logically outstanding. Assert on `.transfer` counts, not on
+  the presence of `.empty-state`.
 
 ## Expense list
 | Element | Selector |
