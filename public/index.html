@@ -15,10 +15,31 @@
   textarea { resize: vertical; min-height: 60px; }
   button { padding: 8px 16px; border: none; border-radius: 4px; background: #2563eb; color: #fff; font-size: 0.9rem; cursor: pointer; }
   button:hover { background: #1d4ed8; }
+  /* Keyboard focus is drawn here rather than inherited from the browser default, which the
+     base button rule above sits next to: it removes the border the default ring is drawn
+     against. 3px solid #1d4ed8 is 6.7:1 against #fff and 6.2:1 against the #f5f5f5 body,
+     both well past the 3:1 a non-text indicator needs. :focus-visible and not :focus — a
+     ring that follows the mouse nags everyone who did not ask for one. */
+  :focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }
   .error { color: #dc2626; font-size: 0.85rem; margin-bottom: 12px; }
   .group-list { list-style: none; }
-  .group-list li { background: #fff; padding: 12px; border-radius: 8px; margin-bottom: 8px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  .group-list li { background: #fff; padding: 0; border-radius: 8px; margin-bottom: 8px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
   .group-list li:hover { background: #e5e7eb; }
+  /* The row is a real button now, so the whole card is its hit area: the padding moved off
+     the li and onto the button rather than leaving a text-only target inside a padded card.
+     Rendered size is unchanged. */
+  .group-list button { display: block; width: 100%; padding: 12px; border: none; border-radius: 8px; background: none; color: inherit; font: inherit; text-align: left; }
+  /* button:hover is also specificity 0,1,1 and is declared earlier in this file, so without
+     this later rule the indigo hover fill sits on top of the card under the pointer. The
+     card's own hover lives on .group-list li:hover and still applies. */
+  .group-list button:hover { background: none; }
+  /* The ring is drawn just outside the button, so the card behind it does not otherwise
+     look touched by focus. */
+  .group-list li:focus-within { background: #e5e7eb; }
+  /* Zeroing the row's padding took the empty state with it: it is an li in the same list
+     with no button in it to move the padding onto, and .group-list li is the more
+     specific of the two rules. Give it back the padding every other empty state has. */
+  .group-list li.empty-state { padding: 24px; }
   .expense { background: #fff; padding: 12px; border-radius: 8px; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
   .expense-header { font-weight: 500; margin-bottom: 4px; }
   .expense-payer { font-size: 0.85rem; color: #555; margin-bottom: 8px; }
@@ -34,8 +55,10 @@
   .radio-group label { display: flex; align-items: center; gap: 4px; font-weight: 400; margin-bottom: 0; }
   .radio-group input { width: auto; margin: 0; }
   .hidden { display: none; }
-  .back-link { color: #2563eb; cursor: pointer; font-size: 0.9rem; margin-bottom: 12px; display: inline-block; }
-  .back-link:hover { text-decoration: underline; }
+  .back-link { background: none; border: none; padding: 0; color: #2563eb; cursor: pointer; font-size: 0.9rem; margin-bottom: 12px; display: inline-block; text-align: left; }
+  /* button:hover is 0,1,1 and outranks .back-link (0,1,0), so the hover fill has to be
+     cancelled here explicitly or the back control becomes a solid indigo block on hover. */
+  .back-link:hover { background: none; text-decoration: underline; }
   /* The balances and settlement panels are plain lists rather than the cards the expense
      list uses: a balance is one line of text whose meaning is carried by the word in front
      of it, and a settlement line is the only thing there is to look at. */
@@ -71,8 +94,8 @@
   </div>
 
   <div id="view-group" class="hidden">
-    <span class="back-link" id="back-link">← Back to groups</span>
-    <h1 id="group-title"></h1>
+    <button type="button" class="back-link" id="back-link">← Back to groups</button>
+    <h1 id="group-title" tabindex="-1"></h1>
     <form id="expense-form">
       <h2>Add Expense</h2>
       <label for="expense-desc">Description</label>
@@ -157,6 +180,10 @@ let currentGroupId = null;
 // needs the member list of the group on screen. Kept beside currentGroupId and cleared
 // with it, so the two never describe different groups.
 let currentMembers = null;
+// The group list is rebuilt on every load, so the row the user opened is gone by the
+// time they come back to it. Focus is restored by group id rather than by holding on
+// to a button that has been thrown away.
+let lastOpenedGroupId = null;
 // The form is cleared only once the POST resolves, so a second submit while the first
 // is in flight posts a second expense. The handler holds this until it is done.
 let expenseSubmitting = false;
@@ -171,19 +198,55 @@ function showCreateView() {
   document.getElementById('view-group').classList.add('hidden');
   currentGroupId = null;
   currentMembers = null;
-  loadGroups();
+  // A heading belonging to a view that is no longer on screen. Left alone it keeps the
+  // last group's name in the DOM, and the create view's own h1 is the one that should
+  // be read out.
+  document.getElementById('group-title').textContent = '';
+  // Focus follows the user back to the row they opened. The list is rebuilt by the load
+  // below, so the row has to be looked up after that load resolves, not now — until it
+  // does, focus is on <body>.
+  loadGroups()
+    .then(() => {
+      const rows = Array.from(document.querySelectorAll('#group-list .group-item'));
+      const target =
+        rows.find((row) => row.dataset.groupId === lastOpenedGroupId) ||
+        rows[0] ||
+        document.getElementById('group-name');
+      if (target) target.focus();
+    })
+    // The list's own error path is unchanged by this ticket, and a failed focus restore
+    // is not worth an unhandled rejection. Matched by id rather than by building a
+    // selector string out of it, so the id never reaches a query.
+    .catch(() => {});
 }
 
 function showGroupView(groupId) {
   document.getElementById('view-create-group').classList.add('hidden');
   document.getElementById('view-group').classList.remove('hidden');
   currentGroupId = groupId;
+  lastOpenedGroupId = groupId;
+  // The heading carries no name until the fetch resolves, which leaves the view untitled
+  // for as long as the request takes. This is a name, not a spinner: it is the same h1
+  // that is focused below, so the view is never on screen with an empty heading.
+  document.getElementById('group-title').textContent = 'Loading…';
   // Opening a group starts on equal split: the mode is a choice about the expense being
   // typed now, and carrying 'by shares' from the last group into a fresh one would make
   // the default depend on where the user had been.
   document.querySelector('input[name="split-mode"][value="equally"]').checked = true;
   syncShareInputs();
-  loadGroup(groupId);
+  // Focus lands on the heading only once the real name is in it. Focusing first would
+  // read out the placeholder and leave the user on the wrong title. Because the heading
+  // is tabindex="-1", pressing Tab from here moves forward past it to the description
+  // field — the back control is the stop before that, reached with Shift+Tab (AC-3).
+  loadGroup(groupId)
+    .then(() => {
+      document.getElementById('group-title').focus();
+    })
+    // Same reason as in showCreateView: a load that fails is already reported by the
+    // panels below the form, and it must not become an unhandled rejection here. The
+    // heading keeps its placeholder — this ticket does not build the group view's
+    // error state, which is out of scope.
+    .catch(() => {});
 }
 
 async function loadGroups() {
@@ -196,8 +259,17 @@ async function loadGroups() {
   }
   for (const group of data.groups) {
     const li = document.createElement('li');
-    li.textContent = group.name;
-    li.addEventListener('click', () => showGroupView(group.id));
+    // A button rather than a listener on the li: this list is how the whole app is
+    // navigated, and an element that only answers a click cannot be reached by Tab or
+    // announced as something to activate. The li stays, so the list is still a list of
+    // rows, and the name still goes in as text for the reason given in renderBalances.
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'group-item';
+    button.dataset.groupId = group.id;
+    button.textContent = group.name;
+    button.addEventListener('click', () => showGroupView(group.id));
+    li.appendChild(button);
     list.appendChild(li);
   }
 }
@@ -564,6 +636,17 @@ document.getElementById('settlement-list').addEventListener('click', async (e) =
     button.disabled = false;
     button.textContent = 'Mark done';
   }
+});
+
+// Escape is the second way back, and it works from wherever focus is — including from
+// inside the description or amount field, because a half-typed expense is not a reason
+// to trap someone in this view. On the create-group view it does nothing: there is
+// nothing there to go back to.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (document.getElementById('view-group').classList.contains('hidden')) return;
+  e.preventDefault();
+  showCreateView();
 });
 
 // Back link
