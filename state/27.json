@@ -222,7 +222,14 @@
     "confidence_rationale": "Both claims in the ticket were reproduced against the real server on an ephemeral port, and the leak is confirmed on this Node (v22.23.2) with the exact fragment-quoting message the ticket describes. The file list is small, every call site of store.load() was grepped (seven, of which six share one catch and one does not), and the change breaks no existing test — 149 pass today and zero of them assert 500 INTERNAL or an INTERNAL message. This version is more confident than v1 for one specific reason: the objection that sank v1 was a fact about .github/workflows/sdlc-qa.yml that I have now read and quoted into the plan, so the recipes are checkable against the workflow rather than against a guess about it. The confidence is held below the high nineties by two things that are judgement rather than fact — the 2000ms budget and the choice of 503 — both argued above, neither obviously wrong. Nothing here needs a person to have decided before it can be implemented, and nothing in the repo is in the way.",
     "mode": "committed"
   },
-  "touch_paths": [],
+  "touch_paths": [
+    "src/store.js",
+    "src/server.js",
+    "test/server.test.js",
+    "test/store.test.js",
+    "test/server.test.js",
+    "test/store.test.js"
+  ],
   "acceptance": [],
   "planned_route": [
     "plan",
