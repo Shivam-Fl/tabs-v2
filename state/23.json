@@ -330,5 +330,24 @@
       }
     ],
     "pr": "24"
-  }
+  },
+  "qa": {
+    "verdict": "blocked",
+    "introduced_bugs": 0,
+    "ac_ids": [
+      "AC-1",
+      "AC-2",
+      "AC-3",
+      "AC-4",
+      "AC-5",
+      "AC-6",
+      "AC-7",
+      "AC-8"
+    ],
+    "sha": "81f350241bc2af0f40aea8b8ff48e04057a07cd6",
+    "run_id": "36229261112",
+    "work_order_version": 1,
+    "at": "2026-09-26T08:26:30.315Z"
+  },
+  "qa_open_bugs": []
 }
