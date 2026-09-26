@@ -390,7 +390,76 @@
         "detail": "The five new store tests each open with the same six lines — mkdtempSync, resolve a path, save and set process.env.STORE_PATH, try, finally { restore; rmSync } — which is thirty lines of boilerplate for five assertions about one module. This diff already writes the helper that removes it: withFileStore at test/server.test.js:1270-1285 does the same bookkeeping in fourteen lines, and unlike the five copies it uses the guarded `if (prev === undefined) delete process.env.STORE_PATH; else process.env.STORE_PATH = prev;` restore. The duplication follows this file's existing convention (the same preamble is already at lines 22 and 60), so it is drift-free, but it is the one place where the smallest correct version of this diff is meaningfully smaller, and adopting the helper here also closes reviewer A's finding 2 for the new cases for free rather than as a separate edit.\n\n`test/store.test.js:94`\n\nEvidence: test/store.test.js:94, 119, 136, 151 and 174 each begin with the identical mkdtempSync + prev + STORE_PATH + try/finally shape; only the directory-name prefix ('store-corrupt-', 'store-check-missing-', 'store-check-saved-', 'store-check-corrupt-', 'store-check-isdir-') varies. test/server.test.js:1270 defines withFileStore, and this same diff introduces the guarded restore at :1283-1284. The five unguarded restores at test/store.test.js:113, 130, 145, 165 and 182 are the exact string that Node coerces to \"undefined\" — confirmed: `node -e \"delete process.env.FOO; process.env.FOO = undefined; console.log(typeof process.env.FOO, JSON.stringify(process.env.FOO))\"` prints `string \"undefined\"`.\n\nFix: Add a `withStorePath(fn)` helper beside the tests in test/store.test.js that takes a filename suffix and a body, does the mkdtempSync / set / guarded restore / rmSync, and return `await withStorePath('corrupt', async (storePath) => { ... })` in each of the five. Roughly twenty net lines shorter, and the env restore is correct in one place instead of five."
       }
     ],
-    "pr": "30"
+    "pr": "30",
+    "qa": [
+      {
+        "id": "BUG-1",
+        "severity": "major",
+        "title": "/healthz certifies a store the app cannot read when the file is valid JSON that is not a group map",
+        "area": "/healthz",
+        "expected": "/healthz reports 503 STORE_UNREADABLE whenever GET /api/groups cannot answer 200 — a file that parses to something load() cannot index is a store the app cannot use, which is the whole question the endpoint was changed to answer.",
+        "actual": "With data/groups.json containing the four bytes `null`, GET /healthz answers 200 {\"status\":\"ok\"} while GET /api/groups answers 500 INTERNAL \"Cannot convert undefined or null to object\" and GET /api/groups/:id/balances answers 500 INTERNAL \"Cannot read properties of null (reading 'seed-goa')\". check() only asserts readable-and-parseable, so JSON.parse('null') satisfies it and load()'s null passes straight through to Object.values().",
+        "repro": [
+          "cd _pr && npm run sdlc:seed && npm run sdlc:serve",
+          "printf 'null' > data/groups.json",
+          "curl -s -o /dev/null -w '%{http_code}\\n' http://localhost:3000/healthz   -> 200",
+          "curl -s http://localhost:3000/api/groups   -> 500 {\"error\":{\"code\":\"INTERNAL\",\"message\":\"Cannot convert undefined or null to object\"}}",
+          "curl -s http://localhost:3000/api/groups/seed-goa/balances   -> 500",
+          "Restore with cd _pr && npm run sdlc:seed"
+        ],
+        "evidence": [
+          "qa-evidence/T-8-parseable-but-unusable-store.txt",
+          "qa-evidence/T-8b-base-commit-comparison.txt"
+        ],
+        "suspected_cause": "src/store.js:51-62 — check() JSON.parses the file and stops there. The result is discarded, so a parse that yields a non-object passes the probe. A one-line shape assertion in check() (result must be a non-null, non-array object) would close the null case; the outer catch in start() would then need a shape check too, since load() does not throw here.",
+        "introduced_by_pr": false,
+        "reproducible": "always"
+      },
+      {
+        "id": "BUG-2",
+        "severity": "minor",
+        "title": "A store file holding a top-level JSON string is served as a fabricated list of one-character groups, with a 200",
+        "area": "api",
+        "expected": "GET /api/groups either refuses a store file that is not a collection of groups, or the health check declines to certify one.",
+        "actual": "With data/groups.json containing the JSON string \"LEAKCANARY_TOPLEVEL_STRING\", GET /api/groups answers 200 {\"groups\":[\"L\",\"E\",\"A\",\"K\",\"C\",\"A\",\"N\",\"A\",\"R\",\"Y\",\"_\",\"T\",\"O\",...]} — 24 invented groups, each 404ing when opened — and GET /healthz answers 200 throughout. Object.values() over a string primitive spreads it into its characters.",
+        "repro": [
+          "cd _pr && npm run sdlc:serve",
+          "printf '\"LEAKCANARY_TOPLEVEL_STRING\"' > data/groups.json",
+          "curl -s http://localhost:3000/api/groups   -> 200 with one single-character \"group\" per character",
+          "curl -s http://localhost:3000/healthz      -> 200 {\"status\":\"ok\"}",
+          "Restore with cd _pr && npm run sdlc:seed"
+        ],
+        "evidence": [
+          "qa-evidence/T-8-parseable-but-unusable-store.txt",
+          "qa-evidence/T-8b-base-commit-comparison.txt"
+        ],
+        "suspected_cause": "Same root as BUG-1 and the same one-line fix: src/store.js check() discards the parsed value instead of asserting it is a plain object, and src/server.js:170-172 passes whatever load() returned straight to Object.values().",
+        "introduced_by_pr": false,
+        "reproducible": "always"
+      },
+      {
+        "id": "BUG-3",
+        "severity": "major",
+        "title": "The group list renders silently empty when the data store is unreadable — the user is told nothing",
+        "area": "ui",
+        "expected": "When GET /api/groups fails, the home view says so — an error line, or at minimum the .empty-state message rather than a bare heading over nothing. The user cannot otherwise tell an empty account from a broken one.",
+        "actual": "With data/groups.json corrupt, the home view renders the \"Existing Groups\" heading over a completely empty list: not even the \"No groups yet. Create one above.\" placeholder. No .error element anywhere is populated, and the browser console carries an uncaught \"Error: Group data store could not be read\" instead.",
+        "repro": [
+          "cd _pr && npm run sdlc:serve, open http://localhost:3000 in a browser",
+          "printf '{\"seed-goa\": {\"members\": [' > data/groups.json",
+          "Reload the page",
+          "\"Existing Groups\" is empty, no error text is shown, and the console logs an uncaught Error"
+        ],
+        "evidence": [
+          "qa-evidence/T-16a-store-unreadable-home.png",
+          "qa-evidence/T-16-base-commit-store-unreadable.png",
+          "qa-evidence/T-15-16-browser-run.txt"
+        ],
+        "suspected_cause": "public/index.html:189-191 — loadGroups() does `const data = await api('/api/groups')` with no try/catch, so a rejected api() call (any non-2xx) leaves #group-list as it was found and rejects an unhandled promise. Every other loader in the file (loadBalancesAndSettlement, the two form handlers) wraps its call and writes to an .error element; this one does not.",
+        "introduced_by_pr": false,
+        "reproducible": "always"
+      }
+    ]
   },
   "qa": {
     "verdict": "blocked",
